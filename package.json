@@ -8,10 +8,10 @@
 		"build": "tsup",
 		"start": "node dist/server.js",
 		"typecheck": "tsc --noEmit",
-		"format:check": "npx @biomejs/biome format ./src",
-		"format:fix": "npx @biomejs/biome format --write ./src",
-		"lint:check": "npx @biomejs/biome lint ./src",
-		"lint:fix": "npx @biomejs/biome lint --write ./src"
+		"format:check": "npx @biomejs/biome format ./src ./prisma",
+		"format:fix": "npx @biomejs/biome format --write ./src ./prisma",
+		"lint:check": "npx @biomejs/biome lint ./src ./prisma",
+		"lint:fix": "npx @biomejs/biome lint --write ./src ./prisma"
 	},
 	"keywords": [
 		"load-shedding",
@@ -26,6 +26,7 @@
 	"dependencies": {
 		"@prisma/adapter-pg": "^7.10.0",
 		"@prisma/client": "^7.10.0",
+		"bcryptjs": "^3.0.3",
 		"cookie-parser": "^1.4.7",
 		"cors": "^2.8.6",
 		"dotenv": "^17.4.2",

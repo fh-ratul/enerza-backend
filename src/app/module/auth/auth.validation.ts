@@ -67,8 +67,19 @@ const RefreshTokenZodSchema = z
 	})
 	.strict();
 
+// The ID token (credential) that Google Sign-In hands to the client.
+const GoogleLoginZodSchema = z
+	.object({
+		idToken: z
+			.string("Google ID token is required")
+			.trim()
+			.min(1, "Google ID token is required"),
+	})
+	.strict();
+
 export const AuthValidation = {
 	RegisterZodSchema,
 	LoginZodSchema,
 	RefreshTokenZodSchema,
+	GoogleLoginZodSchema,
 };

@@ -1,11 +1,21 @@
 import bcrypt from "bcryptjs";
+import type { TokenPayload } from "google-auth-library";
 import httpStatus from "http-status";
-import { Role, UserStatus } from "../../../generated/prisma/enums";
+import {
+	AuthProvider,
+	Role,
+	UserStatus,
+} from "../../../generated/prisma/enums";
 import config from "../../config";
+import { googleClient } from "../../lib/googleAuth";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../utils/AppError";
 import { jwtUtils, type TTokenPayload } from "../../utils/jwt";
-import type { ILoginPayload, IRegisterPayload } from "./auth.interface";
+import type {
+	IGoogleLoginPayload,
+	ILoginPayload,
+	IRegisterPayload,
+} from "./auth.interface";
 
 // Never select the password hash for anything that is sent back to a client.
 const safeUserSelect = {
@@ -210,8 +220,125 @@ const refreshToken = async (token: string) => {
 	return { accessToken };
 };
 
+const googleLogin = async (payload: IGoogleLoginPayload) => {
+	let googleIdTokenPayload: TokenPayload | undefined;
+
+	// Network call to Google: deliberately outside any database transaction.
+	try {
+		const ticket = await googleClient.verifyIdToken({
+			idToken: payload.idToken,
+			audience: config.google_client_id,
+		});
+
+		googleIdTokenPayload = ticket.getPayload();
+	} catch {
+		throw new AppError(
+			httpStatus.UNAUTHORIZED,
+			"Invalid or expired Google ID token",
+		);
+	}
+
+	if (!googleIdTokenPayload?.sub || !googleIdTokenPayload.email) {
+		throw new AppError(
+			httpStatus.UNAUTHORIZED,
+			"Invalid or expired Google ID token",
+		);
+	}
+
+	if (!googleIdTokenPayload.email_verified) {
+		throw new AppError(
+			httpStatus.FORBIDDEN,
+			"Your Google email address is not verified",
+		);
+	}
+
+	const googleId = googleIdTokenPayload.sub;
+	const email = googleIdTokenPayload.email.trim().toLowerCase();
+	const name = googleIdTokenPayload.name?.trim() || email.split("@")[0];
+
+	const existingUser = await prisma.user.findFirst({
+		where: { OR: [{ googleId }, { email }] },
+		select: {
+			...safeUserSelect,
+			googleId: true,
+			isDeleted: true,
+			customer: { select: { areaId: true, meterNumber: true } },
+		},
+	});
+
+	if (existingUser) {
+		// Google login is a customer feature: staff accounts must use their password.
+		if (existingUser.role !== Role.CUSTOMER) {
+			throw new AppError(
+				httpStatus.FORBIDDEN,
+				"Google login is only available for customer accounts",
+			);
+		}
+
+		if (existingUser.isDeleted) {
+			throw new AppError(
+				httpStatus.UNAUTHORIZED,
+				"User not found. Please contact support.",
+			);
+		}
+
+		if (existingUser.status === UserStatus.BLOCKED) {
+			throw new AppError(
+				httpStatus.FORBIDDEN,
+				"Your account has been blocked. Please contact support.",
+			);
+		}
+
+		if (existingUser.googleId && existingUser.googleId !== googleId) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				"This email is already linked to a different Google account",
+			);
+		}
+
+		// An email/password account with the same (verified) email: link it.
+		if (!existingUser.googleId) {
+			await prisma.user.update({
+				where: { id: existingUser.id },
+				data: { googleId },
+			});
+		}
+
+		const { googleId: _googleId, isDeleted, customer, ...user } = existingUser;
+
+		return {
+			...createTokens(user),
+			user,
+			isNewUser: false,
+			isProfileComplete: Boolean(customer?.areaId && customer.meterNumber),
+		};
+	}
+
+	// First Google login: create the customer with an empty profile. They
+	// set their area and meter number later through PATCH /users/me.
+	const user = await prisma.user.create({
+		data: {
+			name,
+			email,
+			googleId,
+			authProvider: AuthProvider.GOOGLE,
+			role: Role.CUSTOMER,
+			customer: { create: {} },
+		},
+		select: safeUserSelect,
+	});
+
+	return {
+		...createTokens(user),
+		user,
+		isNewUser: true,
+		isProfileComplete: false,
+	};
+};
+
 export const AuthServices = {
 	register,
 	login,
 	refreshToken,
+	googleLogin,
 };

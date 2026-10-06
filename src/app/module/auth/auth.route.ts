@@ -21,6 +21,13 @@ router.post(
 );
 
 router.post(
+	"/google",
+	authLimiter,
+	validateRequest(AuthValidation.GoogleLoginZodSchema),
+	AuthController.googleLogin,
+);
+
+router.post(
 	"/refresh-token",
 	validateRequest(AuthValidation.RefreshTokenZodSchema),
 	AuthController.refreshToken,

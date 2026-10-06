@@ -8,3 +8,7 @@ export type ILoginPayload = z.infer<typeof AuthValidation.LoginZodSchema>;
 export type IRefreshTokenPayload = z.infer<
 	typeof AuthValidation.RefreshTokenZodSchema
 >;
+
+export type IGoogleLoginPayload = z.infer<
+	typeof AuthValidation.GoogleLoginZodSchema
+>;

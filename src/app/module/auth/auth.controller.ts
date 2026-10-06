@@ -77,8 +77,25 @@ const refreshToken = catchAsync(async (req: Request, res: Response) => {
 	});
 });
 
+const googleLogin = catchAsync(async (req: Request, res: Response) => {
+	const result = await AuthServices.googleLogin(req.body);
+
+	setAccessTokenCookie(res, result.accessToken);
+	setRefreshTokenCookie(res, result.refreshToken);
+
+	sendResponse(res, {
+		statusCode: httpStatus.OK,
+		success: true,
+		message: result.isProfileComplete
+			? "User logged in with Google successfully"
+			: "Logged in with Google. Please complete your profile (area and meter number)",
+		data: result,
+	});
+});
+
 export const AuthController = {
 	register,
 	login,
 	refreshToken,
+	googleLogin,
 };

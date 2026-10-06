@@ -29,25 +29,44 @@ const toJson = (value: unknown): Prisma.InputJsonValue | undefined =>
 		? undefined
 		: (JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue);
 
+const toAuditRow = ({
+	actor,
+	action,
+	entityType,
+	entityId,
+	before,
+	after,
+	ip,
+}: TAuditLogPayload) => ({
+	action,
+	entityType,
+	entityId,
+	before: toJson(before),
+	after: toJson(after),
+	actorId: actor?.userId,
+	actorRole: actor?.role,
+	ipAddress: ip,
+});
+
 // Takes the transaction client on purpose: the audit row must commit or roll
 // back together with the change it describes.
 export const createAuditLog = (
 	tx: Prisma.TransactionClient,
 	payload: TAuditLogPayload,
 ) => {
-	const { actor, action, entityType, entityId, before, after, ip } = payload;
-
 	return tx.auditLog.create({
-		data: {
-			action,
-			entityType,
-			entityId,
-			before: toJson(before),
-			after: toJson(after),
-			actorId: actor?.userId,
-			actorRole: actor?.role,
-			ipAddress: ip,
-		},
+		data: toAuditRow(payload),
 		select: { id: true },
+	});
+};
+
+// One INSERT for an action that touches several entities at once
+// (e.g. one schedule row per feeder).
+export const createAuditLogs = (
+	tx: Prisma.TransactionClient,
+	payloads: TAuditLogPayload[],
+) => {
+	return tx.auditLog.createMany({
+		data: payloads.map(toAuditRow),
 	});
 };

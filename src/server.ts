@@ -1,6 +1,7 @@
 import app from "./app";
 import config from "./app/config";
 import { prisma } from "./app/lib/prisma";
+import { getRedis } from "./app/lib/redis";
 
 const PORT = config.port;
 
@@ -8,6 +9,16 @@ const main = async () => {
 	try {
 		await prisma.$connect();
 		console.log("Connected to the database successfully.");
+
+		// Redis only backs caching and rate limiting, so a failure here is not fatal.
+		try {
+			await getRedis();
+			console.log("Redis Connected Successfully.");
+		} catch {
+			console.warn(
+				"Starting without Redis: caching is off and rate limits are per-instance.",
+			);
+		}
 
 		app.listen(PORT, () => {
 			console.log(`Server is running on port ${PORT}`);

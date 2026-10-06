@@ -5,13 +5,20 @@ import express, {
 	type Request,
 	type Response,
 } from "express";
+import helmet from "helmet";
 import httpStatus from "http-status";
 import config from "./app/config";
 import { globalErrorHandler } from "./app/middleware/globalErrorHandler";
 import { notFound } from "./app/middleware/notFound";
+import { globalLimiter } from "./app/middleware/rateLimiter";
 import { sendResponse } from "./app/utils/sendResponse";
 
 const app: Application = express();
+
+// Vercel sits behind one proxy hop: needed for the real client IP (rate limits, audit logs).
+app.set("trust proxy", 1);
+
+app.use(helmet());
 
 app.use(
 	cors({
@@ -22,6 +29,8 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
+
+app.use(globalLimiter);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

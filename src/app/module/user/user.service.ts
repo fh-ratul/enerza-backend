@@ -1,12 +1,56 @@
 import httpStatus from "http-status";
-import { ReportStatus, Role } from "../../../generated/prisma/enums";
+import {
+	AuditAction,
+	BillStatus,
+	ReportStatus,
+	Role,
+} from "../../../generated/prisma/enums";
+import type { UserWhereInput } from "../../../generated/prisma/models";
 import type { TErrorSource } from "../../interfaces";
 import { prisma } from "../../lib/prisma";
 import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
-import type { IUpdateMyProfilePayload } from "./user.interface";
+import { createAuditLog } from "../../utils/auditLog";
+import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
+import { USER_SEARCHABLE_FIELDS, USER_SORTABLE_FIELDS } from "./user.constant";
+import type {
+	IUpdateMyProfilePayload,
+	IUpdateUserPayload,
+	IUserListQuery,
+} from "./user.interface";
 
 const CUSTOMER_ONLY_FIELDS = ["address", "areaId", "meterNumber"] as const;
+
+// What an admin sees for a user: never the password hash.
+const adminUserSelect = {
+	id: true,
+	name: true,
+	email: true,
+	role: true,
+	status: true,
+	authProvider: true,
+	createdAt: true,
+	updatedAt: true,
+	customer: {
+		select: {
+			id: true,
+			meterNumber: true,
+			contactNumber: true,
+			connectionType: true,
+			area: { select: { id: true, name: true, code: true } },
+		},
+	},
+	technician: {
+		select: {
+			id: true,
+			contactNumber: true,
+			isAvailable: true,
+			activeJobCount: true,
+			maxActiveJobs: true,
+			zone: { select: { id: true, name: true, code: true } },
+		},
+	},
+} as const;
 
 const getMyProfile = async (user: RequestUser) => {
 	const profile = await prisma.user.findFirst({
@@ -236,7 +280,195 @@ const updateMyProfile = async (
 	return getMyProfile(user);
 };
 
+const getAllUsers = async (query: IUserListQuery) => {
+	const { page, limit, skip, sortBy, sortOrder } = paginationHelper(
+		query,
+		USER_SORTABLE_FIELDS,
+	);
+
+	const andConditions: UserWhereInput[] = [{ isDeleted: false }];
+
+	if (query.searchTerm) {
+		andConditions.push({
+			OR: [
+				...USER_SEARCHABLE_FIELDS.map((field) => ({
+					[field]: { contains: query.searchTerm, mode: "insensitive" as const },
+				})),
+				{
+					customer: {
+						meterNumber: { contains: query.searchTerm, mode: "insensitive" },
+					},
+				},
+			],
+		});
+	}
+
+	if (query.role) {
+		andConditions.push({ role: query.role });
+	}
+
+	if (query.status) {
+		andConditions.push({ status: query.status });
+	}
+
+	const where: UserWhereInput = { AND: andConditions };
+
+	const [users, total] = await prisma.$transaction([
+		prisma.user.findMany({
+			where,
+			skip,
+			take: limit,
+			// `id` as a tie-breaker keeps pages stable when the sort key repeats
+			orderBy: [{ [sortBy]: sortOrder }, { id: "asc" }],
+			select: adminUserSelect,
+		}),
+		prisma.user.count({ where }),
+	]);
+
+	return {
+		data: users,
+		meta: buildMeta(page, limit, total),
+	};
+};
+
+const updateUser = async (
+	userId: string,
+	payload: IUpdateUserPayload,
+	actor: RequestUser,
+	ip?: string,
+) => {
+	if (userId === actor.userId) {
+		throw new AppError(
+			httpStatus.FORBIDDEN,
+			"You cannot change your own status or role",
+		);
+	}
+
+	const target = await prisma.user.findFirst({
+		where: { id: userId, isDeleted: false },
+		select: {
+			id: true,
+			role: true,
+			status: true,
+			password: true,
+			customer: { select: { id: true } },
+		},
+	});
+
+	if (!target) {
+		throw new AppError(httpStatus.NOT_FOUND, "User not found");
+	}
+
+	const { status, role, zoneId } = payload;
+
+	if (status && status === target.status) {
+		throw new AppError(httpStatus.CONFLICT, `User is already ${status}`);
+	}
+
+	if (role && zoneId) {
+		if (target.role !== Role.CUSTOMER) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				target.role === Role.TECHNICIAN
+					? "User is already a technician"
+					: "Only customers can be promoted to technician",
+			);
+		}
+
+		// Technicians sign in with email and password; Google login is for
+		// customers only, so a Google-only account would be locked out.
+		if (!target.password) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				"This account signs in with Google and has no password, so it cannot be promoted",
+			);
+		}
+
+		const [zone, unpaidBill, openReport] = await Promise.all([
+			prisma.distributionZone.findUnique({
+				where: { id: zoneId },
+				select: { id: true },
+			}),
+			prisma.bill.findFirst({
+				where: { customerId: target.customer?.id, status: BillStatus.UNPAID },
+				select: { id: true },
+			}),
+			prisma.outageReport.findFirst({
+				where: { customerId: target.customer?.id, status: ReportStatus.OPEN },
+				select: { id: true },
+			}),
+		]);
+
+		if (!zone) {
+			throw new AppError(httpStatus.NOT_FOUND, "Distribution zone not found", [
+				{ path: "zoneId", message: "Distribution zone not found" },
+			]);
+		}
+
+		// After promotion the account loses its customer access, so it must
+		// not leave an unpaid bill or an open report behind.
+		if (target.customer && (unpaidBill || openReport)) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				unpaidBill
+					? "This customer has an unpaid bill and cannot be promoted yet"
+					: "This customer has an open outage report and cannot be promoted yet",
+			);
+		}
+	}
+
+	const actorInfo = { userId: actor.userId, role: actor.role };
+
+	return prisma.$transaction(async (tx) => {
+		if (status) {
+			await tx.user.update({
+				where: { id: target.id },
+				data: { status },
+			});
+
+			await createAuditLog(tx, {
+				actor: actorInfo,
+				action: AuditAction.STATUS_CHANGE,
+				entityType: "User",
+				entityId: target.id,
+				before: { status: target.status },
+				after: { status },
+				ip,
+			});
+		}
+
+		if (role && zoneId) {
+			await tx.user.update({
+				where: { id: target.id },
+				data: { role },
+			});
+
+			// A concurrent promotion hits the unique userId and surfaces as a 409.
+			await tx.technician.create({
+				data: { userId: target.id, zoneId },
+			});
+
+			await createAuditLog(tx, {
+				actor: actorInfo,
+				action: AuditAction.ROLE_CHANGE,
+				entityType: "User",
+				entityId: target.id,
+				before: { role: target.role },
+				after: { role, zoneId },
+				ip,
+			});
+		}
+
+		return tx.user.findUniqueOrThrow({
+			where: { id: target.id },
+			select: adminUserSelect,
+		});
+	});
+};
+
 export const UserServices = {
 	getMyProfile,
 	updateMyProfile,
+	getAllUsers,
+	updateUser,
 };

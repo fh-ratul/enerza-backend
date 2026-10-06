@@ -41,13 +41,34 @@ const getUniqueFields = (
 	}
 
 	const adapterError = meta?.driverAdapterError as
-		| { cause?: { constraint?: { fields?: unknown } } }
+		| {
+				cause?: {
+					table?: unknown;
+					constraint?: { fields?: unknown; index?: unknown };
+				};
+		  }
 		| undefined;
-	const fields = adapterError?.cause?.constraint?.fields;
+	const cause = adapterError?.cause;
+	const fields = cause?.constraint?.fields;
 
-	return Array.isArray(fields)
-		? fields.map((field) => String(field).replaceAll('"', ""))
-		: [];
+	if (Array.isArray(fields)) {
+		return fields.map((field) => String(field).replaceAll('"', ""));
+	}
+
+	// The pg adapter reports the index instead of its columns. Prisma names
+	// unique indexes "<table>_<field>_<field>_key", e.g. "users_email_key".
+	const index = cause?.constraint?.index;
+
+	if (typeof index !== "string" || !index.endsWith("_key")) {
+		return [];
+	}
+
+	const prefix = typeof cause?.table === "string" ? `${cause.table}_` : "";
+	const columns = index
+		.slice(index.startsWith(prefix) ? prefix.length : 0)
+		.slice(0, -"_key".length);
+
+	return columns ? columns.split("_") : [];
 };
 
 export const globalErrorHandler = (

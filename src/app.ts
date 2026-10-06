@@ -11,6 +11,7 @@ import config from "./app/config";
 import { globalErrorHandler } from "./app/middleware/globalErrorHandler";
 import { notFound } from "./app/middleware/notFound";
 import { globalLimiter } from "./app/middleware/rateLimiter";
+import { AuthRoutes } from "./app/module/auth/auth.route";
 import { sendResponse } from "./app/utils/sendResponse";
 
 const app: Application = express();
@@ -31,6 +32,8 @@ app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
 app.use(globalLimiter);
+
+app.use("/api/v1/auth", AuthRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

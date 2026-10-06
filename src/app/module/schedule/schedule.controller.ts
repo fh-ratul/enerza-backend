@@ -55,8 +55,26 @@ const updateScheduleStatus = catchAsync(async (req: Request, res: Response) => {
 	});
 });
 
+const generateSchedules = catchAsync(async (req: Request, res: Response) => {
+	const result = await ScheduleServices.generateSchedules(
+		req.body,
+		req.user as RequestUser,
+		req.ip,
+	);
+
+	sendResponse(res, {
+		statusCode: result.dryRun ? httpStatus.OK : httpStatus.CREATED,
+		success: true,
+		message: result.dryRun
+			? "Load-shedding plan generated (dry run: nothing was saved)"
+			: `${result.schedulesCreated} load-shedding schedule(s) generated and published`,
+		data: result,
+	});
+});
+
 export const ScheduleController = {
 	createSchedules,
 	getSchedules,
 	updateScheduleStatus,
+	generateSchedules,
 };

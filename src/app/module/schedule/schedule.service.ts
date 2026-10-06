@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import httpStatus from "http-status";
 import type { Prisma } from "../../../generated/prisma/client";
 import {
@@ -8,6 +9,7 @@ import {
 	ScheduleType,
 } from "../../../generated/prisma/enums";
 import type {
+	FeederWhereInput,
 	ScheduleSelect,
 	ScheduleWhereInput,
 } from "../../../generated/prisma/models";
@@ -29,7 +31,9 @@ import {
 } from "../../utils/feederLock";
 import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
 import {
+	addDays,
 	dhakaDayRange,
+	diffMinutes,
 	overlapMinutes,
 	toDhakaDateString,
 } from "../../utils/time";
@@ -37,14 +41,23 @@ import {
 	ACTIVE_SCHEDULE_STATUSES,
 	CUSTOMER_SCHEDULE_LIMIT,
 	DAILY_SHEDDING_CAP_MINUTES,
+	FAIRNESS_WINDOW_DAYS,
 	SCHEDULE_SORTABLE_FIELDS,
 } from "./schedule.constant";
 import type {
 	ICreateSchedulePayload,
+	IGenerateSchedulePayload,
 	IScheduleListQuery,
 	IUpdateScheduleStatusPayload,
 } from "./schedule.interface";
-import { formatWindow, phaseWhere, withPhase } from "./schedule.utils";
+import {
+	buildSlots,
+	formatWindow,
+	phaseWhere,
+	planRotation,
+	type TInterval,
+	withPhase,
+} from "./schedule.utils";
 
 const scheduleSelect = {
 	id: true,
@@ -682,8 +695,293 @@ const updateScheduleStatus = async (
 	return withPhase(updated);
 };
 
+// Loads what the planner needs and runs it. `db` is the transaction client
+// when the plan is about to be saved (so every read happens under the feeder
+// locks) and the plain client for a dry run.
+const buildRotationPlan = async (
+	db: Prisma.TransactionClient,
+	scopeWhere: FeederWhereInput,
+	payload: IGenerateSchedulePayload,
+) => {
+	const { date, startHour, endHour, slotMinutes, deficitMW } = payload;
+
+	const slots = buildSlots(date, startHour, endHour, slotMinutes);
+	const windowStart = slots[0].startTime;
+	const fairnessStart = addDays(windowStart, -FAIRNESS_WINDOW_DAYS);
+	const dayRange = dhakaDayRange(date);
+
+	// Candidates: active, not deleted, never CRITICAL.
+	const feeders = await db.feeder.findMany({
+		where: {
+			...scopeWhere,
+			isDeleted: false,
+			isActive: true,
+			priority: { not: FeederPriority.CRITICAL },
+		},
+		orderBy: { code: "asc" },
+		select: { id: true, code: true, name: true, priority: true, loadMW: true },
+	});
+	const feederIds = feeders.map((feeder) => feeder.id);
+
+	// Fairness: published load shedding in the 7 days before the window.
+	const recentShedding = await db.schedule.findMany({
+		where: {
+			feederId: { in: feederIds },
+			type: ScheduleType.LOAD_SHEDDING,
+			status: ScheduleStatus.PUBLISHED,
+			startTime: { lt: windowStart },
+			endTime: { gt: fairnessStart },
+		},
+		select: { feederId: true, startTime: true, endTime: true },
+	});
+
+	// Everything already on (or touching) the target day: it blocks slots,
+	// and its load-shedding minutes count towards the daily cap.
+	const daySchedules = await db.schedule.findMany({
+		where: {
+			feederId: { in: feederIds },
+			status: { in: [...ACTIVE_SCHEDULE_STATUSES] },
+			startTime: { lte: dayRange.end },
+			endTime: { gte: dayRange.start },
+		},
+		select: { feederId: true, type: true, startTime: true, endTime: true },
+	});
+
+	const shedMinutes: Record<string, number> = {};
+	const dayMinutes: Record<string, number> = {};
+	const busy: Record<string, TInterval[]> = {};
+
+	for (const schedule of recentShedding) {
+		shedMinutes[schedule.feederId] =
+			(shedMinutes[schedule.feederId] ?? 0) +
+			overlapMinutes(
+				schedule.startTime,
+				schedule.endTime,
+				fairnessStart,
+				windowStart,
+			);
+	}
+
+	for (const schedule of daySchedules) {
+		busy[schedule.feederId] ??= [];
+		busy[schedule.feederId].push({
+			startTime: schedule.startTime,
+			endTime: schedule.endTime,
+		});
+
+		if (schedule.type === ScheduleType.LOAD_SHEDDING) {
+			dayMinutes[schedule.feederId] =
+				(dayMinutes[schedule.feederId] ?? 0) +
+				overlapMinutes(
+					schedule.startTime,
+					schedule.endTime,
+					dayRange.start,
+					dayRange.end,
+				);
+		}
+	}
+
+	const candidates = feeders.map((feeder) => ({
+		...feeder,
+		loadMW: Number(feeder.loadMW),
+	}));
+
+	const plan = planRotation({
+		feeders: candidates,
+		slots,
+		deficitMW,
+		shedMinutes,
+		dayMinutes,
+		busy,
+	});
+
+	return { candidates, shedMinutes, plan };
+};
+
+type TRotationPlan = Awaited<ReturnType<typeof buildRotationPlan>>;
+
+// The plan as the API returns it: per slot, plus a per-feeder summary that
+// makes the fairness visible.
+const describePlan = ({ candidates, shedMinutes, plan }: TRotationPlan) => {
+	const plannedMinutes: Record<string, number> = {};
+
+	for (const slot of plan) {
+		for (const feeder of slot.feeders) {
+			plannedMinutes[feeder.id] =
+				(plannedMinutes[feeder.id] ?? 0) +
+				diffMinutes(slot.startTime, slot.endTime);
+		}
+	}
+
+	return {
+		slots: plan.map((slot) => ({
+			window: formatWindow(slot.startTime, slot.endTime),
+			startTime: slot.startTime,
+			endTime: slot.endTime,
+			feeders: slot.feeders.map((feeder) => ({
+				id: feeder.id,
+				code: feeder.code,
+				name: feeder.name,
+				priority: feeder.priority,
+				loadMW: feeder.loadMW,
+				shedMinutesLast7Days: feeder.shedMinutesBefore,
+			})),
+			shedMW: slot.shedMW,
+			unmetMW: slot.unmetMW,
+		})),
+		summary: {
+			totalSlots: plan.length,
+			fullyCoveredSlots: plan.filter((slot) => slot.unmetMW === 0).length,
+			totalUnmetMW:
+				Math.round(
+					plan.reduce((total, slot) => total + slot.unmetMW, 0) * 100,
+				) / 100,
+			feeders: candidates.map((feeder) => ({
+				code: feeder.code,
+				priority: feeder.priority,
+				loadMW: feeder.loadMW,
+				shedMinutesLast7Days: shedMinutes[feeder.id] ?? 0,
+				plannedMinutes: plannedMinutes[feeder.id] ?? 0,
+			})),
+		},
+	};
+};
+
+const generateSchedules = async (
+	payload: IGenerateSchedulePayload,
+	actor: RequestUser,
+	ip?: string,
+) => {
+	const { zoneId, substationId, date, slotMinutes, deficitMW, dryRun } =
+		payload;
+
+	const scope = zoneId
+		? await prisma.distributionZone.findUnique({
+				where: { id: zoneId },
+				select: { id: true, name: true, code: true },
+			})
+		: await prisma.substation.findUnique({
+				where: { id: substationId },
+				select: { id: true, name: true, code: true },
+			});
+
+	if (!scope) {
+		const message = zoneId
+			? "Distribution zone not found"
+			: "Substation not found";
+
+		throw new AppError(httpStatus.NOT_FOUND, message, [
+			{ path: zoneId ? "zoneId" : "substationId", message },
+		]);
+	}
+
+	const scopeWhere: FeederWhereInput = zoneId
+		? { substation: { zoneId } }
+		: { substationId };
+
+	const request = {
+		scope: { type: zoneId ? "ZONE" : "SUBSTATION", ...scope },
+		date,
+		slotMinutes,
+		deficitMW,
+	};
+
+	if (dryRun) {
+		// Preview only: no locks, no writes.
+		const rotation = await buildRotationPlan(prisma, scopeWhere, payload);
+
+		return {
+			dryRun: true,
+			batchId: null,
+			schedulesCreated: 0,
+			...request,
+			...describePlan(rotation),
+		};
+	}
+
+	const batchId = crypto.randomUUID();
+
+	const saved = await prisma.$transaction(async (tx) => {
+		// Lock every feeder in scope first, then plan from what their schedules
+		// look like under the lock. Nobody can add a conflicting schedule
+		// between planning and saving, so the saved plan cannot overlap anything.
+		const inScope = await tx.feeder.findMany({
+			where: { ...scopeWhere, isDeleted: false },
+			select: { id: true },
+		});
+
+		await lockFeeders(
+			tx,
+			inScope.map((feeder) => feeder.id),
+		);
+
+		const rotation = await buildRotationPlan(tx, scopeWhere, payload);
+		const described = describePlan(rotation);
+
+		const rows = rotation.plan.flatMap((slot) =>
+			slot.feeders.map((feeder) => ({
+				type: ScheduleType.LOAD_SHEDDING,
+				status: ScheduleStatus.PUBLISHED,
+				startTime: slot.startTime,
+				endTime: slot.endTime,
+				reason: `Automated load-shedding rotation (${deficitMW} MW deficit)`,
+				batchId,
+				feederId: feeder.id,
+				createdById: actor.userId,
+			})),
+		);
+
+		if (rows.length === 0) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				"No feeder in scope can be shed in this window, so nothing was generated",
+			);
+		}
+
+		await tx.schedule.createMany({ data: rows });
+
+		// One audit row for the whole batch, keyed by its batchId.
+		await createAuditLog(tx, {
+			actor: { userId: actor.userId, role: actor.role },
+			action: AuditAction.GENERATE,
+			entityType: "Schedule",
+			entityId: batchId,
+			after: {
+				...request,
+				startHour: payload.startHour,
+				endHour: payload.endHour,
+				schedulesCreated: rows.length,
+				slots: described.slots.map((slot) => ({
+					window: slot.window,
+					feeders: slot.feeders.map((feeder) => feeder.code),
+					shedMW: slot.shedMW,
+					unmetMW: slot.unmetMW,
+				})),
+			},
+			ip,
+		});
+
+		return {
+			described,
+			schedulesCreated: rows.length,
+			feederIds: [...new Set(rows.map((row) => row.feederId))],
+		};
+	}, LOCKING_TRANSACTION_OPTIONS);
+
+	await invalidateCustomerSchedules(saved.feederIds);
+
+	return {
+		dryRun: false,
+		batchId,
+		schedulesCreated: saved.schedulesCreated,
+		...request,
+		...saved.described,
+	};
+};
+
 export const ScheduleServices = {
 	createSchedules,
 	getSchedules,
 	updateScheduleStatus,
+	generateSchedules,
 };

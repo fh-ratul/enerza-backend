@@ -28,3 +28,18 @@ export const SCHEDULE_SORTABLE_FIELDS = [
 
 // A customer's feeder rarely has more than a handful of future schedules.
 export const CUSTOMER_SCHEDULE_LIMIT = 100;
+
+// ── Automated generator ─────────────────────────────────────────────────────
+
+export const GENERATOR_SLOT_MINUTES = [60, 90, 120] as const;
+
+// Fairness looks at the load shedding a feeder got in the days leading up to
+// the generated window.
+export const FAIRNESS_WINDOW_DAYS = 7;
+
+// Lower rank is shed first. CRITICAL has no rank: it is never shed at all.
+export const SHED_PRIORITY_RANK = {
+	LOW: 0,
+	NORMAL: 1,
+	HIGH: 2,
+} as const;

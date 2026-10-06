@@ -12,3 +12,7 @@ export type IScheduleListQuery = z.infer<
 export type IUpdateScheduleStatusPayload = z.infer<
 	typeof ScheduleValidation.UpdateScheduleStatusZodSchema
 >;
+
+export type IGenerateSchedulePayload = z.infer<
+	typeof ScheduleValidation.GenerateScheduleZodSchema
+>;

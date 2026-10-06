@@ -19,6 +19,14 @@ router.post(
 	ScheduleController.createSchedules,
 );
 
+// Static path: declared before the `/:id` routes.
+router.post(
+	"/generate",
+	auth(Role.ADMIN),
+	validateRequest(ScheduleValidation.GenerateScheduleZodSchema),
+	ScheduleController.generateSchedules,
+);
+
 // Admin: every schedule, with filters. Customer: the published upcoming and
 // ongoing schedules of their own feeder.
 router.get(

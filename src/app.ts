@@ -12,6 +12,7 @@ import { globalErrorHandler } from "./app/middleware/globalErrorHandler";
 import { notFound } from "./app/middleware/notFound";
 import { globalLimiter } from "./app/middleware/rateLimiter";
 import { AuthRoutes } from "./app/module/auth/auth.route";
+import { UserRoutes } from "./app/module/user/user.route";
 import { sendResponse } from "./app/utils/sendResponse";
 
 const app: Application = express();
@@ -34,6 +35,7 @@ app.use(cookieParser());
 app.use(globalLimiter);
 
 app.use("/api/v1/auth", AuthRoutes);
+app.use("/api/v1/users", UserRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

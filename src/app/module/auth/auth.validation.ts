@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { ConnectionType } from "../../../generated/prisma/enums";
+import {
+	contactNumberSchema,
+	meterNumberSchema,
+} from "../../utils/commonValidation";
 
 // Trim and lowercase first, then validate, so " User@Mail.com " is accepted
 // and always stored the same way.
@@ -17,23 +21,6 @@ const passwordSchema = z
 	.regex(/[A-Z]/, "Password must contain at least 1 uppercase letter")
 	.regex(/[0-9]/, "Password must contain at least 1 number")
 	.regex(/[^A-Za-z0-9]/, "Password must contain at least 1 special character");
-
-export const contactNumberSchema = z
-	.string()
-	.trim()
-	.regex(
-		/^(\+?88)?01[3-9]\d{8}$/,
-		"Contact number must be a valid Bangladeshi mobile number",
-	);
-
-export const meterNumberSchema = z
-	.string("Meter number is required")
-	.trim()
-	.toUpperCase()
-	.regex(
-		/^[A-Z0-9-]{4,30}$/,
-		"Meter number must be 4-30 letters, digits or hyphens",
-	);
 
 const RegisterZodSchema = z
 	.object({

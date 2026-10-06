@@ -12,6 +12,7 @@ import { globalErrorHandler } from "./app/middleware/globalErrorHandler";
 import { notFound } from "./app/middleware/notFound";
 import { globalLimiter } from "./app/middleware/rateLimiter";
 import { AuthRoutes } from "./app/module/auth/auth.route";
+import { FeederRoutes } from "./app/module/feeder/feeder.route";
 import { UserRoutes } from "./app/module/user/user.route";
 import { sendResponse } from "./app/utils/sendResponse";
 
@@ -36,6 +37,7 @@ app.use(globalLimiter);
 
 app.use("/api/v1/auth", AuthRoutes);
 app.use("/api/v1/users", UserRoutes);
+app.use("/api/v1/feeders", FeederRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

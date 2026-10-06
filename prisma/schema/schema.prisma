@@ -1,0 +1,11 @@
+// Multi-file schema: every *.prisma file in this folder is merged.
+// Run `npx prisma generate` after ANY change here.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}

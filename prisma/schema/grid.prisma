@@ -1,0 +1,71 @@
+// Grid hierarchy: DistributionZone → Substation → Feeder → Area.
+// Zones and substations are seed data; feeders (with nested areas) are the
+// full-CRUD core resource.
+
+model DistributionZone {
+  id        String   @id @default(uuid(7))
+  name      String   @unique
+  code      String   @unique
+  createdAt DateTime @default(now())
+
+  substations Substation[]
+  technicians Technician[]
+
+  @@map("distribution_zones")
+}
+
+model Substation {
+  id         String   @id @default(uuid(7))
+  name       String
+  code       String   @unique
+  capacityMW Decimal  @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+
+  zoneId String
+  zone   DistributionZone @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+
+  feeders Feeder[]
+
+  @@index([zoneId])
+  @@map("substations")
+}
+
+model Feeder {
+  id        String         @id @default(uuid(7))
+  name      String
+  code      String         @unique
+  loadMW    Decimal        @db.Decimal(10, 2)
+  priority  FeederPriority @default(NORMAL)
+  isActive  Boolean        @default(true)
+  isDeleted Boolean        @default(false)
+  deletedAt DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  substationId String
+  substation   Substation @relation(fields: [substationId], references: [id], onDelete: Restrict)
+
+  areas Area[]
+
+  @@index([substationId, priority, isDeleted])
+  @@index([name])
+  @@map("feeders")
+}
+
+model Area {
+  id        String    @id @default(uuid(7))
+  name      String
+  code      String    @unique
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  feederId String
+  feeder   Feeder @relation(fields: [feederId], references: [id], onDelete: Restrict)
+
+  customers Customer[]
+
+  @@index([feederId, isDeleted])
+  @@index([name])
+  @@map("areas")
+}

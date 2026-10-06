@@ -1,0 +1,18 @@
+model Technician {
+  id             String    @id @default(uuid(7))
+  contactNumber  String?
+  isAvailable    Boolean   @default(true) // on/off duty, toggled by the technician
+  activeJobCount Int       @default(0) // claimed and released atomically in SQL
+  maxActiveJobs  Int       @default(2)
+  lastAssignedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  userId String           @unique
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  zoneId String
+  zone   DistributionZone @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+
+  @@index([zoneId, isAvailable, activeJobCount])
+  @@map("technicians")
+}

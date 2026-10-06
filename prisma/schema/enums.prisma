@@ -1,0 +1,27 @@
+enum Role {
+  CUSTOMER
+  TECHNICIAN
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  BLOCKED
+}
+
+enum AuthProvider {
+  CREDENTIAL
+  GOOGLE
+}
+
+enum FeederPriority {
+  CRITICAL
+  HIGH
+  NORMAL
+  LOW
+}
+
+enum ConnectionType {
+  RESIDENTIAL
+  COMMERCIAL
+}

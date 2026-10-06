@@ -1,0 +1,21 @@
+// The customer profile doubles as the service connection (one meter per
+// customer), so there is no separate Meter model.
+model Customer {
+  id               String         @id @default(uuid(7))
+  contactNumber    String?
+  address          String?
+  meterNumber      String?        @unique // null until a Google user completes their profile
+  connectionType   ConnectionType @default(RESIDENTIAL)
+  sanctionedLoadKW Decimal        @default(2) @db.Decimal(6, 2)
+  lastReading      Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  userId String  @unique
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  areaId String?
+  area   Area?   @relation(fields: [areaId], references: [id], onDelete: Restrict)
+
+  @@index([areaId])
+  @@map("customers")
+}

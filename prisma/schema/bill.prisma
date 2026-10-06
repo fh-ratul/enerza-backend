@@ -1,0 +1,29 @@
+model Bill {
+  id              String     @id @default(uuid(7))
+  billNumber      String     @unique
+  billingMonth    String // "YYYY-MM"
+  previousReading Int
+  currentReading  Int
+  unitsConsumed   Int
+  energyCharge    Decimal    @db.Decimal(10, 2)
+  demandCharge    Decimal    @db.Decimal(10, 2)
+  vatAmount       Decimal    @db.Decimal(10, 2)
+  totalAmount     Decimal    @db.Decimal(10, 2)
+  dueDate         DateTime
+  status          BillStatus @default(UNPAID) // "overdue" is computed on read, never stored
+  paidAt          DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  // Financial rows are never deleted, so every relation is Restrict.
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  issuedById String
+  issuedBy   User     @relation("BillIssuer", fields: [issuedById], references: [id], onDelete: Restrict)
+
+  payments Payment[]
+
+  @@unique([customerId, billingMonth], name: "unique_customer_month_bill")
+  @@index([status, dueDate])
+  @@map("bills")
+}

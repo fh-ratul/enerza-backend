@@ -1,0 +1,69 @@
+// An unexpected power cut on a feeder. At most one outage per feeder is open
+// (REPORTED / ASSIGNED / IN_PROGRESS) at a time: later reports attach to it.
+model Outage {
+  id              String         @id @default(uuid(7))
+  status          OutageStatus   @default(REPORTED)
+  priority        OutagePriority @default(MEDIUM)
+  description     String?
+  reportCount     Int            @default(0)
+  startedAt       DateTime       @default(now())
+  assignedAt      DateTime?
+  resolvedAt      DateTime?
+  durationMinutes Int?
+  resolutionNote  String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  feederId     String
+  feeder       Feeder      @relation(fields: [feederId], references: [id], onDelete: Restrict)
+  technicianId String?
+  technician   Technician? @relation(fields: [technicianId], references: [id], onDelete: SetNull)
+
+  reports  OutageReport[]
+  timeline OutageTimeline[]
+
+  @@index([feederId, status])
+  @@index([status, priority, createdAt])
+  @@index([technicianId, status])
+  @@map("outages")
+}
+
+// Append-only history of every status change.
+model OutageTimeline {
+  id         String        @id @default(uuid(7))
+  fromStatus OutageStatus?
+  toStatus   OutageStatus
+  note       String?
+  createdAt  DateTime      @default(now())
+
+  outageId    String
+  outage      Outage  @relation(fields: [outageId], references: [id], onDelete: Cascade)
+  changedById String?
+  changedBy   User?   @relation(fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([outageId, createdAt])
+  @@map("outage_timelines")
+}
+
+// A single "my power is out" report from a customer. It is either explained
+// by a running schedule (scheduleId) or attached to an outage (outageId).
+model OutageReport {
+  id          String       @id @default(uuid(7))
+  status      ReportStatus @default(OPEN)
+  description String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  areaId     String
+  area       Area      @relation(fields: [areaId], references: [id], onDelete: Restrict)
+  outageId   String?
+  outage     Outage?   @relation(fields: [outageId], references: [id], onDelete: SetNull)
+  scheduleId String?
+  schedule   Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, status])
+  @@index([outageId])
+  @@map("outage_reports")
+}

@@ -25,3 +25,63 @@ enum ConnectionType {
   RESIDENTIAL
   COMMERCIAL
 }
+
+enum ScheduleType {
+  LOAD_SHEDDING
+  MAINTENANCE
+}
+
+// UPCOMING / ONGOING / COMPLETED are NOT stored: the phase of a published
+// schedule is computed from the clock on every read.
+enum ScheduleStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
+enum OutageStatus {
+  REPORTED
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+}
+
+enum OutagePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ReportStatus {
+  OPEN
+  EXPLAINED
+  RESOLVED
+  REJECTED
+}
+
+enum BillStatus {
+  UNPAID
+  PAID
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  SOFT_DELETE
+  STATUS_CHANGE
+  ROLE_CHANGE
+  GENERATE
+  PAYMENT_COMPLETED
+  PAYMENT_FAILED
+}

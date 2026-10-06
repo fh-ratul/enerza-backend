@@ -14,6 +14,10 @@ model User {
 
   customer   Customer?
   technician Technician?
+  auditLogs  AuditLog[]
+  schedules  Schedule[]       @relation("ScheduleCreator")
+  timeline   OutageTimeline[]
+  bills      Bill[]           @relation("BillIssuer")
 
   @@index([role, status, isDeleted])
   @@map("users")

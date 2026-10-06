@@ -1,0 +1,25 @@
+// One bKash checkout attempt for a bill. A bill can have several attempts
+// (expired, cancelled, failed) but only one of them ends up PAID.
+model Payment {
+  id              String        @id @default(uuid(7))
+  status          PaymentStatus @default(PENDING)
+  amount          Decimal       @db.Decimal(10, 2)
+  currency        String        @default("BDT")
+  invoiceNumber   String        @unique // bKash merchantInvoiceNumber
+  bkashPaymentId  String?       @unique
+  bkashTrxId      String?       @unique
+  paidAt          DateTime?
+  gatewayResponse Json?
+  requiresRefund  Boolean       @default(false) // money captured for a bill that was already paid
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  billId     String
+  bill       Bill     @relation(fields: [billId], references: [id], onDelete: Restrict)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([billId, status])
+  @@index([customerId, createdAt])
+  @@map("payments")
+}

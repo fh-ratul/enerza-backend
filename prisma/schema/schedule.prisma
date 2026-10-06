@@ -1,0 +1,24 @@
+model Schedule {
+  id           String         @id @default(uuid(7))
+  type         ScheduleType
+  status       ScheduleStatus @default(DRAFT)
+  startTime    DateTime // stored in UTC, entered in Asia/Dhaka
+  endTime      DateTime
+  reason       String?
+  batchId      String? // set when created by the generator
+  cancelReason String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  feederId    String
+  feeder      Feeder @relation(fields: [feederId], references: [id], onDelete: Restrict)
+  createdById String
+  createdBy   User   @relation("ScheduleCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  reports OutageReport[]
+
+  // Overlap checks: WHERE feederId = ? AND startTime < ? AND endTime > ?
+  @@index([feederId, startTime, endTime])
+  @@index([status, startTime])
+  @@map("schedules")
+}

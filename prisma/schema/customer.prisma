@@ -16,6 +16,10 @@ model Customer {
   areaId String?
   area   Area?   @relation(fields: [areaId], references: [id], onDelete: Restrict)
 
+  reports  OutageReport[]
+  bills    Bill[]
+  payments Payment[]
+
   @@index([areaId])
   @@map("customers")
 }

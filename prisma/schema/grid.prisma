@@ -45,7 +45,9 @@ model Feeder {
   substationId String
   substation   Substation @relation(fields: [substationId], references: [id], onDelete: Restrict)
 
-  areas Area[]
+  areas     Area[]
+  schedules Schedule[]
+  outages   Outage[]
 
   @@index([substationId, priority, isDeleted])
   @@index([name])
@@ -64,6 +66,7 @@ model Area {
   feeder   Feeder @relation(fields: [feederId], references: [id], onDelete: Restrict)
 
   customers Customer[]
+  reports   OutageReport[]
 
   @@index([feederId, isDeleted])
   @@index([name])

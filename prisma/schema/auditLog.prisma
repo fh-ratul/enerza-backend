@@ -1,0 +1,21 @@
+// Append-only record of every critical action. Written in the same
+// transaction as the change it describes.
+model AuditLog {
+  id         String      @id @default(uuid(7))
+  action     AuditAction
+  entityType String // "User" | "Feeder" | "Schedule" | "Outage" | "Bill" | "Payment"
+  entityId   String
+  before     Json?
+  after      Json?
+  actorRole  Role?
+  ipAddress  String?
+  createdAt  DateTime    @default(now())
+
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}

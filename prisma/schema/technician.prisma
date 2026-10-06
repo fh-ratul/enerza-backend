@@ -13,6 +13,8 @@ model Technician {
   zoneId String
   zone   DistributionZone @relation(fields: [zoneId], references: [id], onDelete: Restrict)
 
+  outages Outage[]
+
   @@index([zoneId, isAvailable, activeJobCount])
   @@map("technicians")
 }

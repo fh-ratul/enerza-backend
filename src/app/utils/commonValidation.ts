@@ -73,7 +73,11 @@ const rangeBoundSchema = (edge: "start" | "end") =>
 				(DATE_REGEX.test(value) && isRealDate(value)) ||
 				(DATE_TIME_REGEX.test(value) &&
 					!Number.isNaN(parseDhakaDateTime(value).getTime())),
-			"must be a date (2026-10-06) or a datetime (2026-10-06T16:00)",
+			{
+				message: "must be a date (2026-10-06) or a datetime (2026-10-06T16:00)",
+				// stop here on bad input, so later range checks never see an Invalid Date
+				abort: true,
+			},
 		)
 		.transform((value) =>
 			DATE_REGEX.test(value)

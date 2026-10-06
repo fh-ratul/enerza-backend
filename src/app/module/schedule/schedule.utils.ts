@@ -1,9 +1,11 @@
 import { ScheduleStatus, ScheduleType } from "../../../generated/prisma/enums";
+import type { ScheduleWhereInput } from "../../../generated/prisma/models";
 import { diffMinutes, formatDhaka, toDhakaTimeString } from "../../utils/time";
 import {
 	MAX_LOAD_SHEDDING_MINUTES,
 	MAX_MAINTENANCE_MINUTES,
 	MIN_SCHEDULE_MINUTES,
+	type SCHEDULE_PHASES,
 } from "./schedule.constant";
 
 // Pure schedule rules: no database access, so they can be unit-tested directly.
@@ -46,6 +48,24 @@ export const withPhase = <T extends TPhaseInput>(
 	...schedule,
 	phase: getPhase(schedule, now),
 });
+
+// The same rule as getPhase, expressed as a database filter.
+export const phaseWhere = (
+	phase: (typeof SCHEDULE_PHASES)[number],
+	now: Date = new Date(),
+): ScheduleWhereInput => {
+	const filters = {
+		UPCOMING: { status: ScheduleStatus.PUBLISHED, startTime: { gt: now } },
+		ONGOING: {
+			status: ScheduleStatus.PUBLISHED,
+			startTime: { lte: now },
+			endTime: { gt: now },
+		},
+		COMPLETED: { status: ScheduleStatus.PUBLISHED, endTime: { lte: now } },
+	} satisfies Record<string, ScheduleWhereInput>;
+
+	return filters[phase];
+};
 
 // Returns why a time window is not allowed for this schedule type, or null.
 export const getWindowError = (

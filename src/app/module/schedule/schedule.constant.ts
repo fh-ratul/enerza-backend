@@ -14,3 +14,17 @@ export const ACTIVE_SCHEDULE_STATUSES = [
 ] as const;
 
 export const MAX_FEEDERS_PER_SCHEDULE = 20;
+
+// Phases of a PUBLISHED schedule, computed from the clock (never stored).
+export const SCHEDULE_PHASES = ["UPCOMING", "ONGOING", "COMPLETED"] as const;
+
+export const SCHEDULE_SORTABLE_FIELDS = [
+	"startTime",
+	"endTime",
+	"createdAt",
+	"type",
+	"status",
+] as const;
+
+// A customer's feeder rarely has more than a handful of future schedules.
+export const CUSTOMER_SCHEDULE_LIMIT = 100;

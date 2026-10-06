@@ -3,19 +3,31 @@ import type { Prisma } from "../../../generated/prisma/client";
 import {
 	AuditAction,
 	FeederPriority,
+	Role,
+	ScheduleStatus,
 	ScheduleType,
 } from "../../../generated/prisma/enums";
-import type { ScheduleSelect } from "../../../generated/prisma/models";
+import type {
+	ScheduleSelect,
+	ScheduleWhereInput,
+} from "../../../generated/prisma/models";
 import type { TErrorSource } from "../../interfaces";
 import { prisma } from "../../lib/prisma";
 import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
-import { createAuditLogs } from "../../utils/auditLog";
-import { CACHE_KEYS, cacheDel } from "../../utils/cache";
+import { createAuditLog, createAuditLogs } from "../../utils/auditLog";
+import {
+	CACHE_KEYS,
+	CACHE_TTL,
+	cacheDel,
+	cacheGet,
+	cacheSet,
+} from "../../utils/cache";
 import {
 	LOCKING_TRANSACTION_OPTIONS,
 	lockFeeders,
 } from "../../utils/feederLock";
+import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
 import {
 	dhakaDayRange,
 	overlapMinutes,
@@ -23,10 +35,16 @@ import {
 } from "../../utils/time";
 import {
 	ACTIVE_SCHEDULE_STATUSES,
+	CUSTOMER_SCHEDULE_LIMIT,
 	DAILY_SHEDDING_CAP_MINUTES,
+	SCHEDULE_SORTABLE_FIELDS,
 } from "./schedule.constant";
-import type { ICreateSchedulePayload } from "./schedule.interface";
-import { formatWindow, withPhase } from "./schedule.utils";
+import type {
+	ICreateSchedulePayload,
+	IScheduleListQuery,
+	IUpdateScheduleStatusPayload,
+} from "./schedule.interface";
+import { formatWindow, phaseWhere, withPhase } from "./schedule.utils";
 
 const scheduleSelect = {
 	id: true,
@@ -341,6 +359,331 @@ const createSchedules = async (
 	return schedules.map((schedule) => withPhase(schedule));
 };
 
+// What a customer sees: no drafts, no internal fields.
+const customerScheduleSelect = {
+	id: true,
+	type: true,
+	status: true,
+	startTime: true,
+	endTime: true,
+	reason: true,
+	feeder: { select: { id: true, name: true, code: true } },
+} satisfies ScheduleSelect;
+
+type TCustomerSchedule = {
+	id: string;
+	type: ScheduleType;
+	status: ScheduleStatus;
+	// ISO strings when the row comes back from the JSON cache
+	startTime: Date | string;
+	endTime: Date | string;
+	reason: string | null;
+	feeder: { id: string; name: string; code: string };
+};
+
+// Customers only ever see the published, not-yet-finished schedules of the
+// feeder that serves their own area.
+const getCustomerSchedules = async (
+	query: IScheduleListQuery,
+	user: RequestUser,
+) => {
+	const customer = await prisma.customer.findUnique({
+		where: { userId: user.userId },
+		select: {
+			area: { select: { feederId: true, isDeleted: true } },
+		},
+	});
+
+	if (!customer?.area || customer.area.isDeleted) {
+		throw new AppError(
+			httpStatus.BAD_REQUEST,
+			"Set your area in your profile (PATCH /users/me) to see your schedule",
+		);
+	}
+
+	const { feederId } = customer.area;
+	const cacheKey = CACHE_KEYS.customerSchedules(feederId);
+	const now = new Date();
+
+	let schedules = await cacheGet<TCustomerSchedule[]>(cacheKey);
+	const fromCache = schedules !== null;
+
+	if (!schedules) {
+		schedules = await prisma.schedule.findMany({
+			where: {
+				feederId,
+				status: ScheduleStatus.PUBLISHED,
+				endTime: { gt: now },
+			},
+			orderBy: { startTime: "asc" },
+			take: CUSTOMER_SCHEDULE_LIMIT,
+			select: customerScheduleSelect,
+		});
+
+		await cacheSet(cacheKey, schedules, CACHE_TTL.customerSchedules);
+	}
+
+	// Only the rows are cached. The phase is worked out now, and anything that
+	// ended while it sat in the cache is dropped, so a cached response can
+	// never claim that a finished schedule is still ONGOING.
+	const live = schedules
+		.filter((schedule) => new Date(schedule.endTime) > now)
+		.map((schedule) => withPhase(schedule, now));
+
+	const { page, limit, skip } = paginationHelper(
+		query,
+		SCHEDULE_SORTABLE_FIELDS,
+	);
+
+	return {
+		data: live.slice(skip, skip + limit),
+		meta: buildMeta(page, limit, live.length),
+		fromCache,
+	};
+};
+
+const getAllSchedules = async (query: IScheduleListQuery) => {
+	const { page, limit, skip, sortBy, sortOrder } = paginationHelper(
+		query,
+		SCHEDULE_SORTABLE_FIELDS,
+		"startTime",
+	);
+	const now = new Date();
+
+	const andConditions: ScheduleWhereInput[] = [];
+
+	if (query.type) {
+		andConditions.push({ type: query.type });
+	}
+
+	if (query.status) {
+		andConditions.push({ status: query.status });
+	}
+
+	// UPCOMING / ONGOING / COMPLETED are not columns: they translate into a
+	// status + time-range filter.
+	if (query.phase) {
+		andConditions.push(phaseWhere(query.phase, now));
+	}
+
+	if (query.feederId) {
+		andConditions.push({ feederId: query.feederId });
+	}
+
+	if (query.zoneId) {
+		andConditions.push({ feeder: { substation: { zoneId: query.zoneId } } });
+	}
+
+	// Schedules that overlap the requested range.
+	if (query.from) {
+		andConditions.push({ endTime: { gt: query.from } });
+	}
+
+	if (query.to) {
+		andConditions.push({ startTime: { lt: query.to } });
+	}
+
+	const where: ScheduleWhereInput = { AND: andConditions };
+
+	const [schedules, total] = await prisma.$transaction([
+		prisma.schedule.findMany({
+			where,
+			skip,
+			take: limit,
+			orderBy: [{ [sortBy]: sortOrder }, { id: "asc" }],
+			select: scheduleSelect,
+		}),
+		prisma.schedule.count({ where }),
+	]);
+
+	return {
+		data: schedules.map((schedule) => withPhase(schedule, now)),
+		meta: buildMeta(page, limit, total),
+		fromCache: false,
+	};
+};
+
+const getSchedules = async (query: IScheduleListQuery, user: RequestUser) => {
+	if (user.role === Role.CUSTOMER) {
+		return getCustomerSchedules(query, user);
+	}
+
+	return getAllSchedules(query);
+};
+
+const updateScheduleStatus = async (
+	scheduleId: string,
+	payload: IUpdateScheduleStatusPayload,
+	actor: RequestUser,
+	ip?: string,
+) => {
+	const { status, reason } = payload;
+
+	// Only needed to know which feeder to lock; everything else is re-read
+	// under the lock.
+	const existing = await prisma.schedule.findUnique({
+		where: { id: scheduleId },
+		select: { feederId: true },
+	});
+
+	if (!existing) {
+		throw new AppError(httpStatus.NOT_FOUND, "Schedule not found");
+	}
+
+	const updated = await prisma.$transaction(async (tx) => {
+		await lockFeeders(tx, [existing.feederId]);
+
+		const schedule = await tx.schedule.findUniqueOrThrow({
+			where: { id: scheduleId },
+			select: {
+				type: true,
+				status: true,
+				startTime: true,
+				endTime: true,
+				feeder: {
+					select: {
+						id: true,
+						code: true,
+						priority: true,
+						isActive: true,
+						isDeleted: true,
+					},
+				},
+			},
+		});
+		const now = new Date();
+
+		if (schedule.status === ScheduleStatus.CANCELLED) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				"A cancelled schedule cannot be changed",
+			);
+		}
+
+		if (schedule.status === status) {
+			throw new AppError(httpStatus.CONFLICT, `Schedule is already ${status}`);
+		}
+
+		if (status === ScheduleStatus.PUBLISHED) {
+			// DRAFT → PUBLISHED. Everything that was true when the draft was
+			// created is checked again, because it may have changed since.
+			if (schedule.startTime <= now) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"This draft's start time has already passed, so it can no longer be published",
+				);
+			}
+
+			if (schedule.feeder.isDeleted) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"The feeder of this schedule has been deleted",
+				);
+			}
+
+			const pathFor = () => "status";
+			const ruleErrors = getFeederRuleErrors(
+				schedule.type,
+				[schedule.feeder],
+				pathFor,
+			);
+
+			if (ruleErrors.critical.length) {
+				throw new AppError(
+					httpStatus.BAD_REQUEST,
+					"CRITICAL feeders can only get MAINTENANCE schedules",
+					ruleErrors.critical,
+				);
+			}
+
+			if (ruleErrors.inactive.length) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"Inactive feeders cannot be load-shed",
+					ruleErrors.inactive,
+				);
+			}
+
+			const conflicts = await findScheduleConflicts(tx, {
+				feeders: [schedule.feeder],
+				type: schedule.type,
+				startTime: schedule.startTime,
+				endTime: schedule.endTime,
+				excludeScheduleId: scheduleId,
+				pathFor,
+			});
+
+			if (conflicts.length) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"The schedule conflicts with existing schedules",
+					conflicts,
+				);
+			}
+		} else if (schedule.status === ScheduleStatus.PUBLISHED) {
+			// PUBLISHED → CANCELLED: customers have already seen it, so it needs
+			// a reason, and it only makes sense while the schedule has not ended.
+			if (schedule.endTime <= now) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"A completed schedule cannot be cancelled",
+				);
+			}
+
+			if (!reason) {
+				throw new AppError(
+					httpStatus.BAD_REQUEST,
+					"A reason is required to cancel a published schedule",
+					[{ path: "reason", message: "reason is required" }],
+				);
+			}
+		}
+
+		// Conditional on the status we just read: if another request changed
+		// the row in between, nothing is updated and we report a conflict.
+		const { count } = await tx.schedule.updateMany({
+			where: { id: scheduleId, status: schedule.status },
+			data: {
+				status,
+				cancelReason: status === ScheduleStatus.CANCELLED ? reason : undefined,
+			},
+		});
+
+		if (count === 0) {
+			throw new AppError(
+				httpStatus.CONFLICT,
+				"The schedule was changed by another request. Please try again",
+			);
+		}
+
+		await createAuditLog(tx, {
+			actor: { userId: actor.userId, role: actor.role },
+			action: AuditAction.STATUS_CHANGE,
+			entityType: "Schedule",
+			entityId: scheduleId,
+			before: { status: schedule.status },
+			after: {
+				status,
+				cancelReason: status === ScheduleStatus.CANCELLED ? reason : undefined,
+				feederCode: schedule.feeder.code,
+			},
+			ip,
+		});
+
+		return tx.schedule.findUniqueOrThrow({
+			where: { id: scheduleId },
+			select: scheduleSelect,
+		});
+	}, LOCKING_TRANSACTION_OPTIONS);
+
+	// Publishing or cancelling changes what customers on this feeder see.
+	await invalidateCustomerSchedules([existing.feederId]);
+
+	return withPhase(updated);
+};
+
 export const ScheduleServices = {
 	createSchedules,
+	getSchedules,
+	updateScheduleStatus,
 };

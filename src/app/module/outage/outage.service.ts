@@ -1,14 +1,17 @@
 import httpStatus from "http-status";
+import { Prisma } from "../../../generated/prisma/client";
 import {
 	AuditAction,
 	OutageStatus,
 	ReportStatus,
 	Role,
 	type ScheduleType,
+	UserStatus,
 } from "../../../generated/prisma/enums";
 import type {
 	OutageReportSelect,
 	OutageSelect,
+	OutageTimelineSelect,
 	OutageWhereInput,
 } from "../../../generated/prisma/models";
 import { prisma } from "../../lib/prisma";
@@ -21,18 +24,21 @@ import {
 	lockFeeders,
 } from "../../utils/feederLock";
 import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
-import { toDhakaTimeString } from "../../utils/time";
+import { diffMinutes, toDhakaTimeString } from "../../utils/time";
 import { phaseWhere } from "../schedule/schedule.utils";
 import {
 	OPEN_OUTAGE_STATUSES,
 	OUTAGE_OUTCOME,
 	OUTAGE_SORTABLE_FIELDS,
+	OUTAGE_TRANSITIONS,
+	TRANSITION_ROLE,
 } from "./outage.constant";
 import type {
 	ICreateOutagePayload,
 	IOutageListQuery,
+	IUpdateOutageStatusPayload,
 } from "./outage.interface";
-import { computeOutagePriority } from "./outage.utils";
+import { canTransition, computeOutagePriority } from "./outage.utils";
 
 const outageSelect = {
 	id: true,
@@ -77,6 +83,19 @@ const reportSelect = {
 	description: true,
 	createdAt: true,
 } satisfies OutageReportSelect;
+
+const timelineSelect = {
+	id: true,
+	fromStatus: true,
+	toStatus: true,
+	note: true,
+	createdAt: true,
+} satisfies OutageTimelineSelect;
+
+const staffTimelineSelect = {
+	...timelineSelect,
+	changedBy: { select: { id: true, name: true, role: true } },
+} satisfies OutageTimelineSelect;
 
 const SCHEDULE_LABEL: Record<ScheduleType, string> = {
 	LOAD_SHEDDING: "Scheduled load shedding",
@@ -478,17 +497,8 @@ const getOutages = async (query: IOutageListQuery, user: RequestUser) => {
 				...outageSelect,
 				timeline: {
 					orderBy: { createdAt: "asc" },
-					select: {
-						id: true,
-						fromStatus: true,
-						toStatus: true,
-						note: true,
-						createdAt: true,
-						// who made each change is staff information
-						changedBy: isCustomer
-							? false
-							: { select: { id: true, name: true, role: true } },
-					},
+					// who made each change is staff information
+					select: isCustomer ? timelineSelect : staffTimelineSelect,
 				},
 				// a customer also gets their own report on each outage
 				reports: isCustomer
@@ -509,7 +519,367 @@ const getOutages = async (query: IOutageListQuery, user: RequestUser) => {
 	};
 };
 
+// Row locks on the technicians a transition may touch, taken in id order so
+// two reassignments that swap the same pair of technicians cannot deadlock.
+const lockTechnicians = async (
+	tx: Prisma.TransactionClient,
+	technicianIds: string[],
+): Promise<void> => {
+	const sortedIds = [...new Set(technicianIds)].sort();
+
+	if (sortedIds.length === 0) {
+		return;
+	}
+
+	await tx.$queryRaw`
+		SELECT id FROM "technicians"
+		WHERE id IN (${Prisma.join(sortedIds)})
+		ORDER BY id
+		FOR UPDATE`;
+};
+
+// Capacity claim (Requirements §6.4): one conditional UPDATE. The check and
+// the increment happen in the same statement, so a technician can never be
+// pushed past maxActiveJobs, whoever else is assigning at the same moment.
+// `now` is passed in rather than using SQL now(), which follows the session
+// time zone while every other timestamp in the database is UTC.
+const claimTechnician = async (
+	tx: Prisma.TransactionClient,
+	technicianId: string,
+	now: Date,
+): Promise<boolean> => {
+	const claimed = await tx.$executeRaw`
+		UPDATE "technicians"
+		SET "activeJobCount" = "activeJobCount" + 1,
+			"lastAssignedAt" = ${now},
+			"updatedAt" = ${now}
+		WHERE id = ${technicianId}
+			AND "isAvailable" = true
+			AND "activeJobCount" < "maxActiveJobs"`;
+
+	return claimed === 1;
+};
+
+const releaseTechnician = async (
+	tx: Prisma.TransactionClient,
+	technicianId: string,
+	now: Date,
+): Promise<void> => {
+	await tx.$executeRaw`
+		UPDATE "technicians"
+		SET "activeJobCount" = GREATEST("activeJobCount" - 1, 0),
+			"updatedAt" = ${now}
+		WHERE id = ${technicianId}`;
+};
+
+// A technician the admin named: must exist, be active and work in the zone.
+const claimNamedTechnician = async (
+	tx: Prisma.TransactionClient,
+	technicianId: string,
+	zone: { id: string; name: string },
+	now: Date,
+) => {
+	const technician = await tx.technician.findFirst({
+		where: { id: technicianId, user: { isDeleted: false } },
+		select: {
+			id: true,
+			zoneId: true,
+			user: { select: { name: true, status: true } },
+		},
+	});
+
+	if (!technician) {
+		throw new AppError(httpStatus.NOT_FOUND, "Technician not found", [
+			{ path: "technicianId", message: "Technician not found" },
+		]);
+	}
+
+	if (technician.user.status !== UserStatus.ACTIVE) {
+		throw new AppError(
+			httpStatus.CONFLICT,
+			`${technician.user.name}'s account is blocked`,
+			[{ path: "technicianId", message: "Technician is not active" }],
+		);
+	}
+
+	if (technician.zoneId !== zone.id) {
+		throw new AppError(
+			httpStatus.BAD_REQUEST,
+			`${technician.user.name} does not work in the ${zone.name} zone, where this outage is`,
+			[{ path: "technicianId", message: "Technician is in another zone" }],
+		);
+	}
+
+	if (!(await claimTechnician(tx, technician.id, now))) {
+		throw new AppError(
+			httpStatus.CONFLICT,
+			"Technician is off duty or at capacity",
+			[{ path: "technicianId", message: "Off duty or at capacity" }],
+		);
+	}
+
+	return { id: technician.id, name: technician.user.name };
+};
+
+// Auto-assign: the eligible technician in the zone with the fewest active
+// jobs, and among those the one who has waited longest since their last job.
+const claimBestTechnician = async (
+	tx: Prisma.TransactionClient,
+	zone: { id: string; name: string },
+	excludeTechnicianId: string | null,
+	now: Date,
+) => {
+	const candidates = await tx.technician.findMany({
+		where: {
+			zoneId: zone.id,
+			isAvailable: true,
+			user: { status: UserStatus.ACTIVE, isDeleted: false },
+			...(excludeTechnicianId && { id: { not: excludeTechnicianId } }),
+		},
+		orderBy: [
+			{ activeJobCount: "asc" },
+			{ lastAssignedAt: { sort: "asc", nulls: "first" } },
+			{ id: "asc" },
+		],
+		select: { id: true, user: { select: { name: true } } },
+	});
+
+	// The claim itself decides who still has capacity.
+	for (const candidate of candidates) {
+		if (await claimTechnician(tx, candidate.id, now)) {
+			return { id: candidate.id, name: candidate.user.name };
+		}
+	}
+
+	throw new AppError(
+		httpStatus.CONFLICT,
+		`No technician available in the ${zone.name} zone`,
+	);
+};
+
+// The outage state machine (Requirements §6.3). Every move writes a timeline
+// row and an audit row in the same transaction as its side effects.
+const updateOutageStatus = async (
+	id: string,
+	payload: IUpdateOutageStatusPayload,
+	user: RequestUser,
+	ip?: string,
+) => {
+	const { status: toStatus, technicianId, note } = payload;
+
+	if (TRANSITION_ROLE[toStatus] !== user.role) {
+		throw new AppError(
+			httpStatus.FORBIDDEN,
+			`Only ${TRANSITION_ROLE[toStatus] === Role.ADMIN ? "an admin" : "the assigned technician"} can move an outage to ${toStatus}`,
+		);
+	}
+
+	const existing = await prisma.outage.findUnique({
+		where: { id },
+		select: { feederId: true },
+	});
+
+	if (!existing) {
+		throw new AppError(httpStatus.NOT_FOUND, "Outage not found");
+	}
+
+	const now = new Date();
+
+	const result = await prisma.$transaction(async (tx) => {
+		// The same lock customer intake takes. Two moves on one outage run one
+		// after the other, and a report cannot attach itself to an outage that
+		// is being resolved or cancelled at that moment.
+		await lockFeeders(tx, [existing.feederId]);
+
+		// Read again under the lock: this is the status the move starts from.
+		const outage = await tx.outage.findUniqueOrThrow({
+			where: { id },
+			select: {
+				status: true,
+				startedAt: true,
+				technicianId: true,
+				technician: {
+					select: { userId: true, user: { select: { name: true } } },
+				},
+				feeder: {
+					select: {
+						substation: {
+							select: { zone: { select: { id: true, name: true } } },
+						},
+					},
+				},
+			},
+		});
+
+		if (
+			user.role === Role.TECHNICIAN &&
+			outage.technician?.userId !== user.userId
+		) {
+			throw new AppError(
+				httpStatus.FORBIDDEN,
+				"This outage is not assigned to you",
+			);
+		}
+
+		if (!canTransition(outage.status, toStatus)) {
+			throw new AppError(
+				httpStatus.BAD_REQUEST,
+				`An outage that is ${outage.status} cannot be moved to ${toStatus}`,
+				[
+					{
+						path: "status",
+						message:
+							OUTAGE_TRANSITIONS[outage.status].length > 0
+								? `Allowed: ${OUTAGE_TRANSITIONS[outage.status].join(", ")}`
+								: `${outage.status} is final`,
+					},
+				],
+			);
+		}
+
+		const { zone } = outage.feeder.substation;
+		const previousTechnicianId = outage.technicianId;
+		const previousTechnicianName = outage.technician?.user.name;
+
+		let assigned: { id: string; name: string } | undefined;
+		let message: string;
+		let timelineNote = note;
+
+		if (toStatus === OutageStatus.ASSIGNED) {
+			if (technicianId && technicianId === previousTechnicianId) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					`This outage is already assigned to ${previousTechnicianName}`,
+					[{ path: "technicianId", message: "Already assigned" }],
+				);
+			}
+
+			const zoneTechnicians = technicianId
+				? [{ id: technicianId }]
+				: await tx.technician.findMany({
+						where: { zoneId: zone.id },
+						select: { id: true },
+					});
+
+			await lockTechnicians(tx, [
+				...zoneTechnicians.map((technician) => technician.id),
+				...(previousTechnicianId ? [previousTechnicianId] : []),
+			]);
+
+			assigned = technicianId
+				? await claimNamedTechnician(tx, technicianId, zone, now)
+				: await claimBestTechnician(tx, zone, previousTechnicianId, now);
+
+			// Reassignment: the previous technician gets the slot back.
+			if (previousTechnicianId) {
+				await releaseTechnician(tx, previousTechnicianId, now);
+			}
+
+			const auto = technicianId ? "" : "auto-";
+			message = previousTechnicianId
+				? `Outage ${auto}reassigned from ${previousTechnicianName} to ${assigned.name}`
+				: `Outage ${auto}assigned to ${assigned.name}`;
+			timelineNote = note ? `${message}. ${note}` : message;
+
+			await tx.outage.update({
+				where: { id },
+				data: {
+					status: OutageStatus.ASSIGNED,
+					technicianId: assigned.id,
+					assignedAt: now,
+				},
+			});
+		} else if (toStatus === OutageStatus.IN_PROGRESS) {
+			message = "Work on the outage has started";
+
+			await tx.outage.update({
+				where: { id },
+				data: { status: OutageStatus.IN_PROGRESS },
+			});
+		} else {
+			const isResolved = toStatus === OutageStatus.RESOLVED;
+			message = `Outage ${isResolved ? "resolved" : "cancelled"} successfully`;
+
+			await tx.outage.update({
+				where: { id },
+				data: isResolved
+					? {
+							status: OutageStatus.RESOLVED,
+							resolvedAt: now,
+							durationMinutes: Math.max(diffMinutes(outage.startedAt, now), 0),
+							resolutionNote: note,
+						}
+					: { status: OutageStatus.CANCELLED },
+			});
+
+			// The technician stays on the outage as its history, but the job no
+			// longer counts against their capacity.
+			if (previousTechnicianId) {
+				await releaseTechnician(tx, previousTechnicianId, now);
+			}
+
+			// Closing the reports lets those customers report again later.
+			await tx.outageReport.updateMany({
+				where: { outageId: id, status: ReportStatus.OPEN },
+				data: {
+					status: isResolved ? ReportStatus.RESOLVED : ReportStatus.REJECTED,
+				},
+			});
+		}
+
+		await tx.outageTimeline.create({
+			data: {
+				outageId: id,
+				fromStatus: outage.status,
+				toStatus,
+				note: timelineNote,
+				changedById: user.userId,
+			},
+		});
+
+		await createAuditLog(tx, {
+			actor: { userId: user.userId, role: user.role },
+			action: AuditAction.STATUS_CHANGE,
+			entityType: "Outage",
+			entityId: id,
+			before: {
+				status: outage.status,
+				technicianId: previousTechnicianId,
+			},
+			after: {
+				status: toStatus,
+				technicianId: assigned?.id ?? previousTechnicianId,
+				...(assigned && {
+					technicianName: assigned.name,
+					autoAssigned: !technicianId,
+				}),
+				...(note && { note }),
+			},
+			ip,
+		});
+
+		const updated = await tx.outage.findUniqueOrThrow({
+			where: { id },
+			select: {
+				...outageSelect,
+				timeline: {
+					orderBy: { createdAt: "asc" },
+					select: staffTimelineSelect,
+				},
+			},
+		});
+
+		return { message, outage: updated };
+	}, LOCKING_TRANSACTION_OPTIONS);
+
+	// Open counts, MTTR and technician workload on the dashboard have changed.
+	await cacheDel(CACHE_KEYS.adminStats);
+
+	return result;
+};
+
 export const OutageServices = {
 	createOutage,
 	getOutages,
+	updateOutageStatus,
 };

@@ -5,7 +5,11 @@ import {
 	paginationQueryShape,
 	toDateSchema,
 } from "../../utils/commonValidation";
-import { OUTAGE_SORTABLE_FIELDS } from "./outage.constant";
+import {
+	NOTE_REQUIRED_STATUSES,
+	OUTAGE_SORTABLE_FIELDS,
+	OUTAGE_TARGET_STATUSES,
+} from "./outage.constant";
 
 // One body for both callers. Which of them may send `feederId` is enforced in
 // the service, where the caller's role is known:
@@ -53,7 +57,41 @@ const OutageListQueryZodSchema = z
 		message: "to must be after from",
 	});
 
+// Who may make which move, and from which status, is decided in the service
+// (OUTAGE_TRANSITIONS + TRANSITION_ROLE). This only checks the shape.
+const UpdateOutageStatusZodSchema = z
+	.object({
+		status: z.enum(
+			OUTAGE_TARGET_STATUSES,
+			"status must be ASSIGNED, IN_PROGRESS, RESOLVED or CANCELLED",
+		),
+		// only with ASSIGNED; left out, the system picks a technician
+		technicianId: z.uuid("technicianId must be a valid id").optional(),
+		note: z
+			.string("note must be a string")
+			.trim()
+			.min(5, "note must be at least 5 characters long")
+			.max(500, "note cannot be longer than 500 characters")
+			.optional(),
+	})
+	.strict()
+	.refine(
+		(body) => !NOTE_REQUIRED_STATUSES.includes(body.status) || !!body.note,
+		{
+			path: ["note"],
+			message: "note is required when an outage is resolved or cancelled",
+		},
+	)
+	.refine(
+		(body) => !body.technicianId || body.status === OutageStatus.ASSIGNED,
+		{
+			path: ["technicianId"],
+			message: "technicianId can only be sent with status ASSIGNED",
+		},
+	);
+
 export const OutageValidation = {
+	UpdateOutageStatusZodSchema,
 	CreateOutageZodSchema,
 	OutageListQueryZodSchema,
 };

@@ -37,7 +37,24 @@ const getOutages = catchAsync(async (req: Request, res: Response) => {
 	});
 });
 
+const updateOutageStatus = catchAsync(async (req: Request, res: Response) => {
+	const { message, outage } = await OutageServices.updateOutageStatus(
+		req.params.id as string,
+		req.body,
+		req.user as RequestUser,
+		req.ip,
+	);
+
+	sendResponse(res, {
+		statusCode: httpStatus.OK,
+		success: true,
+		message,
+		data: outage,
+	});
+});
+
 export const OutageController = {
 	createOutage,
 	getOutages,
+	updateOutageStatus,
 };

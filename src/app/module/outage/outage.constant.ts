@@ -2,6 +2,7 @@ import {
 	FeederPriority,
 	OutagePriority,
 	OutageStatus,
+	Role,
 } from "../../../generated/prisma/enums";
 
 // An outage is "open" until it is RESOLVED or CANCELLED. A feeder has at most
@@ -40,6 +41,43 @@ export const OUTAGE_OUTCOME = {
 	LINKED_TO_EXISTING_OUTAGE: "LINKED_TO_EXISTING_OUTAGE",
 	NEW_OUTAGE_CREATED: "NEW_OUTAGE_CREATED",
 } as const;
+
+// The state machine (Requirements §6.3): from → the statuses it may move to.
+// ASSIGNED → ASSIGNED and IN_PROGRESS → ASSIGNED are reassignments.
+export const OUTAGE_TRANSITIONS: Record<OutageStatus, readonly OutageStatus[]> =
+	{
+		[OutageStatus.REPORTED]: [OutageStatus.ASSIGNED, OutageStatus.CANCELLED],
+		[OutageStatus.ASSIGNED]: [
+			OutageStatus.IN_PROGRESS,
+			OutageStatus.ASSIGNED,
+			OutageStatus.CANCELLED,
+		],
+		[OutageStatus.IN_PROGRESS]: [OutageStatus.RESOLVED, OutageStatus.ASSIGNED],
+		[OutageStatus.RESOLVED]: [],
+		[OutageStatus.CANCELLED]: [],
+	};
+
+// The statuses an outage can be moved to, and the one role that may do it.
+// The admin dispatches and cancels; the assigned technician does the work.
+export const TRANSITION_ROLE = {
+	[OutageStatus.ASSIGNED]: Role.ADMIN,
+	[OutageStatus.CANCELLED]: Role.ADMIN,
+	[OutageStatus.IN_PROGRESS]: Role.TECHNICIAN,
+	[OutageStatus.RESOLVED]: Role.TECHNICIAN,
+} as const;
+
+export const OUTAGE_TARGET_STATUSES = [
+	OutageStatus.ASSIGNED,
+	OutageStatus.IN_PROGRESS,
+	OutageStatus.RESOLVED,
+	OutageStatus.CANCELLED,
+] as const;
+
+// Moving to these statuses needs a note: what fixed it, or why it was dropped.
+export const NOTE_REQUIRED_STATUSES: readonly OutageStatus[] = [
+	OutageStatus.RESOLVED,
+	OutageStatus.CANCELLED,
+];
 
 export const OUTAGE_SORTABLE_FIELDS = [
 	"createdAt",

@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import {
 	type IncrementResponse,
+	ipKeyGenerator,
 	MemoryStore,
 	type Options,
 	rateLimit,
@@ -80,12 +81,21 @@ type TLimiterConfig = {
 	windowMs: number;
 	limit: number;
 	message: string;
+	// defaults to the client IP
+	keyGenerator?: (req: Request) => string;
 };
 
-const createLimiter = ({ name, windowMs, limit, message }: TLimiterConfig) =>
+const createLimiter = ({
+	name,
+	windowMs,
+	limit,
+	message,
+	keyGenerator,
+}: TLimiterConfig) =>
 	rateLimit({
 		windowMs,
 		limit,
+		...(keyGenerator && { keyGenerator }),
 		standardHeaders: "draft-8",
 		legacyHeaders: false,
 		store: new ResilientRedisStore(`rl:${name}:`),
@@ -115,8 +125,11 @@ export const authLimiter = createLimiter({
 	message: "Too many authentication attempts. Please try again in 15 minutes",
 });
 
-// Payment initiation: each call creates a bKash payment session.
+// Payment initiation: each call creates a bKash payment session. Mounted
+// after auth() and counted per user, so customers behind one shared IP do not
+// use up each other's attempts.
 export const paymentLimiter = createLimiter({
+	keyGenerator: (req) => req.user?.userId ?? ipKeyGenerator(req.ip ?? ""),
 	name: "payment",
 	windowMs: 60 * 1000,
 	limit: 5,

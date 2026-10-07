@@ -15,6 +15,7 @@ import { AuthRoutes } from "./app/module/auth/auth.route";
 import { BillRoutes } from "./app/module/bill/bill.route";
 import { FeederRoutes } from "./app/module/feeder/feeder.route";
 import { OutageRoutes } from "./app/module/outage/outage.route";
+import { PaymentRoutes } from "./app/module/payment/payment.route";
 import { ScheduleRoutes } from "./app/module/schedule/schedule.route";
 import { UserRoutes } from "./app/module/user/user.route";
 import { sendResponse } from "./app/utils/sendResponse";
@@ -44,6 +45,7 @@ app.use("/api/v1/feeders", FeederRoutes);
 app.use("/api/v1/schedules", ScheduleRoutes);
 app.use("/api/v1/outages", OutageRoutes);
 app.use("/api/v1/bills", BillRoutes);
+app.use("/api/v1/payments", PaymentRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

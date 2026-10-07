@@ -3,6 +3,7 @@ import httpStatus from "http-status";
 import type { RequestUser } from "../../middleware/checkAuth";
 import { catchAsync } from "../../utils/catchAsync";
 import { sendResponse } from "../../utils/sendResponse";
+import type { IOutageListQuery } from "./outage.interface";
 import { OutageServices } from "./outage.service";
 
 const createOutage = catchAsync(async (req: Request, res: Response) => {
@@ -21,6 +22,22 @@ const createOutage = catchAsync(async (req: Request, res: Response) => {
 	});
 });
 
+const getOutages = catchAsync(async (req: Request, res: Response) => {
+	const { data, meta } = await OutageServices.getOutages(
+		req.query as IOutageListQuery,
+		req.user as RequestUser,
+	);
+
+	sendResponse(res, {
+		statusCode: httpStatus.OK,
+		success: true,
+		message: "Outages retrieved successfully",
+		data,
+		meta,
+	});
+});
+
 export const OutageController = {
 	createOutage,
+	getOutages,
 };

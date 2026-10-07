@@ -40,3 +40,12 @@ export const OUTAGE_OUTCOME = {
 	LINKED_TO_EXISTING_OUTAGE: "LINKED_TO_EXISTING_OUTAGE",
 	NEW_OUTAGE_CREATED: "NEW_OUTAGE_CREATED",
 } as const;
+
+export const OUTAGE_SORTABLE_FIELDS = [
+	"createdAt",
+	"startedAt",
+	"resolvedAt",
+	"priority",
+	"status",
+	"reportCount",
+] as const;

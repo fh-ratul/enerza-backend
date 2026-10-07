@@ -9,6 +9,7 @@ import {
 import type {
 	OutageReportSelect,
 	OutageSelect,
+	OutageWhereInput,
 } from "../../../generated/prisma/models";
 import { prisma } from "../../lib/prisma";
 import type { RequestUser } from "../../middleware/checkAuth";
@@ -19,10 +20,18 @@ import {
 	LOCKING_TRANSACTION_OPTIONS,
 	lockFeeders,
 } from "../../utils/feederLock";
+import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
 import { toDhakaTimeString } from "../../utils/time";
 import { phaseWhere } from "../schedule/schedule.utils";
-import { OPEN_OUTAGE_STATUSES, OUTAGE_OUTCOME } from "./outage.constant";
-import type { ICreateOutagePayload } from "./outage.interface";
+import {
+	OPEN_OUTAGE_STATUSES,
+	OUTAGE_OUTCOME,
+	OUTAGE_SORTABLE_FIELDS,
+} from "./outage.constant";
+import type {
+	ICreateOutagePayload,
+	IOutageListQuery,
+} from "./outage.interface";
 import { computeOutagePriority } from "./outage.utils";
 
 const outageSelect = {
@@ -412,6 +421,95 @@ const createOutage = async (
 	return createIncident(payload, user, ip);
 };
 
+// Admin: every outage. Technician: the ones assigned to them. Customer: the
+// ones they reported. The filters then narrow that set further.
+const getOutages = async (query: IOutageListQuery, user: RequestUser) => {
+	const { page, limit, skip, sortBy, sortOrder } = paginationHelper(
+		query,
+		OUTAGE_SORTABLE_FIELDS,
+	);
+
+	const andConditions: OutageWhereInput[] = [];
+	const isCustomer = user.role === Role.CUSTOMER;
+
+	if (user.role === Role.TECHNICIAN) {
+		andConditions.push({ technician: { userId: user.userId } });
+	}
+
+	if (isCustomer) {
+		andConditions.push({
+			reports: { some: { customer: { userId: user.userId } } },
+		});
+	}
+
+	if (query.status) {
+		andConditions.push({ status: query.status });
+	}
+
+	if (query.priority) {
+		andConditions.push({ priority: query.priority });
+	}
+
+	if (query.feederId) {
+		andConditions.push({ feederId: query.feederId });
+	}
+
+	if (query.zoneId) {
+		andConditions.push({ feeder: { substation: { zoneId: query.zoneId } } });
+	}
+
+	if (query.from) {
+		andConditions.push({ startedAt: { gte: query.from } });
+	}
+
+	if (query.to) {
+		andConditions.push({ startedAt: { lt: query.to } });
+	}
+
+	const where: OutageWhereInput = { AND: andConditions };
+
+	const [outages, total] = await prisma.$transaction([
+		prisma.outage.findMany({
+			where,
+			skip,
+			take: limit,
+			orderBy: [{ [sortBy]: sortOrder }, { id: "asc" }],
+			select: {
+				...outageSelect,
+				timeline: {
+					orderBy: { createdAt: "asc" },
+					select: {
+						id: true,
+						fromStatus: true,
+						toStatus: true,
+						note: true,
+						createdAt: true,
+						// who made each change is staff information
+						changedBy: isCustomer
+							? false
+							: { select: { id: true, name: true, role: true } },
+					},
+				},
+				// a customer also gets their own report on each outage
+				reports: isCustomer
+					? {
+							where: { customer: { userId: user.userId } },
+							orderBy: { createdAt: "desc" },
+							select: reportSelect,
+						}
+					: false,
+			},
+		}),
+		prisma.outage.count({ where }),
+	]);
+
+	return {
+		data: outages,
+		meta: buildMeta(page, limit, total),
+	};
+};
+
 export const OutageServices = {
 	createOutage,
+	getOutages,
 };

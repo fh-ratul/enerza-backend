@@ -11,6 +11,7 @@ import config from "./app/config";
 import { globalErrorHandler } from "./app/middleware/globalErrorHandler";
 import { notFound } from "./app/middleware/notFound";
 import { globalLimiter } from "./app/middleware/rateLimiter";
+import { AdminRoutes } from "./app/module/admin/admin.route";
 import { AuthRoutes } from "./app/module/auth/auth.route";
 import { BillRoutes } from "./app/module/bill/bill.route";
 import { FeederRoutes } from "./app/module/feeder/feeder.route";
@@ -46,6 +47,7 @@ app.use("/api/v1/schedules", ScheduleRoutes);
 app.use("/api/v1/outages", OutageRoutes);
 app.use("/api/v1/bills", BillRoutes);
 app.use("/api/v1/payments", PaymentRoutes);
+app.use("/api/v1/admin", AdminRoutes);
 
 app.get("/", (_req: Request, res: Response) => {
 	sendResponse(res, {

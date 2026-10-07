@@ -16,3 +16,13 @@ export const COMMERCIAL_FLAT_PAISA = 1200; // per unit (kWh)
 export const DEMAND_CHARGE_PAISA_PER_KW = 4200; // per kW of sanctioned load
 export const VAT_PERCENT = 5;
 export const BILL_DUE_DAYS = 14;
+
+export const BILL_SORTABLE_FIELDS = [
+	"createdAt",
+	"dueDate",
+	"billingMonth",
+	"totalAmount",
+	"unitsConsumed",
+	"status",
+	"paidAt",
+] as const;

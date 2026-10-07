@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
-import type { ConnectionType } from "../../../generated/prisma/enums";
+import type {
+	BillStatus,
+	ConnectionType,
+} from "../../../generated/prisma/enums";
 import {
 	COMMERCIAL_FLAT_PAISA,
 	DEMAND_CHARGE_PAISA_PER_KW,
@@ -69,6 +72,12 @@ export const paisaToTaka = (paisa: number): string =>
 // "1234.56" (or a Prisma Decimal) → 123456 paisa
 export const takaToPaisa = (taka: { toString(): string } | number): number =>
 	Math.round(Number(taka.toString()) * 100);
+
+// "Overdue" is never stored: it is an unpaid bill looked at after its due date.
+export const isBillOverdue = (
+	bill: { status: BillStatus; dueDate: Date },
+	now: Date = new Date(),
+): boolean => bill.status === "UNPAID" && bill.dueDate < now;
 
 // ENZ-BILL-202610-9F3A1C2B
 export const generateBillNumber = (billingMonth: string): string =>

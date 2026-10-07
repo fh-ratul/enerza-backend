@@ -2,7 +2,10 @@ import { Router } from "express";
 import { Role } from "../../../generated/prisma/enums";
 import { auth } from "../../middleware/checkAuth";
 import { paymentLimiter } from "../../middleware/rateLimiter";
-import { validateRequest } from "../../middleware/validateRequest";
+import {
+	validateQuery,
+	validateRequest,
+} from "../../middleware/validateRequest";
 import { PaymentController } from "./payment.controller";
 import { PaymentValidation } from "./payment.validation";
 
@@ -15,6 +18,14 @@ router.post(
 	paymentLimiter,
 	validateRequest(PaymentValidation.InitiatePaymentZodSchema),
 	PaymentController.initiatePayment,
+);
+
+// Public: bKash redirects the customer's browser here after checkout, so
+// there is no token. The payment is verified with bKash before it is trusted.
+router.get(
+	"/bkash/callback",
+	validateQuery(PaymentValidation.BkashCallbackQueryZodSchema),
+	PaymentController.handleBkashCallback,
 );
 
 export const PaymentRoutes = router;

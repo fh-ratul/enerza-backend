@@ -86,13 +86,16 @@ const postJson = async <T>(
 		);
 	}
 
-	// bKash answers some rejected requests (wrong credentials, for one) with
-	// an empty body. Callers treat a response without the expected fields as
-	// a failure, so that case becomes an empty object.
+	// An empty or non-JSON body (a gateway error page, or what bKash sends for
+	// wrong credentials) is "no answer", never "the payment failed": the
+	// caller must not conclude anything about the money from it.
 	try {
 		return (await response.json()) as T;
 	} catch {
-		return {} as T;
+		throw new AppError(
+			httpStatus.BAD_GATEWAY,
+			`bKash gave no usable answer (HTTP ${response.status}). Please try again`,
+		);
 	}
 };
 
@@ -191,4 +194,31 @@ export const createBkashPayment = ({
 		currency: "BDT",
 		intent: "sale",
 		merchantInvoiceNumber: invoiceNumber,
+	});
+
+// The shape shared by "execute" and "query payment status".
+export type TBkashPaymentResponse = {
+	statusCode?: string;
+	statusMessage?: string;
+	paymentID?: string;
+	trxID?: string;
+	transactionStatus?: string; // "Initiated" | "Completed" | …
+	amount?: string;
+	currency?: string;
+	merchantInvoiceNumber?: string;
+	errorCode?: string;
+	errorMessage?: string;
+};
+
+// Captures the money for a payment the customer has approved in the bKash app.
+export const executeBkashPayment = (paymentID: string) =>
+	bkashRequest<TBkashPaymentResponse>("/tokenized/checkout/execute", {
+		paymentID,
+	});
+
+// Read-only: what bKash currently knows about a payment. Used when execute
+// did not give a clear answer (a timeout, or a callback that arrived twice).
+export const queryBkashPayment = (paymentID: string) =>
+	bkashRequest<TBkashPaymentResponse>("/tokenized/checkout/payment/status", {
+		paymentID,
 	});

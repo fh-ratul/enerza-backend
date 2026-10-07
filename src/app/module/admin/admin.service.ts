@@ -7,12 +7,15 @@ import {
 	ScheduleType,
 	UserStatus,
 } from "../../../generated/prisma/enums";
+import type { AuditLogWhereInput } from "../../../generated/prisma/models";
 import { prisma } from "../../lib/prisma";
 import { CACHE_KEYS, CACHE_TTL, cacheGet, cacheSet } from "../../utils/cache";
+import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
 import { addDays, dhakaMonthRange, toDhakaMonthString } from "../../utils/time";
 import { OPEN_OUTAGE_STATUSES } from "../outage/outage.constant";
 import { phaseWhere } from "../schedule/schedule.utils";
-import { STATS_WINDOW_DAYS } from "./admin.constant";
+import { AUDIT_LOG_SORTABLE_FIELDS, STATS_WINDOW_DAYS } from "./admin.constant";
+import type { IAuditLogListQuery } from "./admin.interface";
 import { computeReliability, toCountMap } from "./admin.utils";
 
 const toMoney = (value: { toFixed(decimals: number): string } | null): string =>
@@ -239,6 +242,72 @@ const getStats = async () => {
 	return { stats, fromCache: false };
 };
 
+// The audit trail, newest first. Filtering by entityType + entityId gives the
+// full history of one record; actorId gives everything one person did.
+const getAuditLogs = async (query: IAuditLogListQuery) => {
+	const { page, limit, skip, sortBy, sortOrder } = paginationHelper(
+		query,
+		AUDIT_LOG_SORTABLE_FIELDS,
+	);
+
+	const andConditions: AuditLogWhereInput[] = [];
+
+	if (query.action) {
+		andConditions.push({ action: query.action });
+	}
+
+	if (query.entityType) {
+		andConditions.push({ entityType: query.entityType });
+	}
+
+	if (query.entityId) {
+		andConditions.push({ entityId: query.entityId });
+	}
+
+	if (query.actorId) {
+		andConditions.push({ actorId: query.actorId });
+	}
+
+	if (query.from) {
+		andConditions.push({ createdAt: { gte: query.from } });
+	}
+
+	if (query.to) {
+		andConditions.push({ createdAt: { lt: query.to } });
+	}
+
+	const where: AuditLogWhereInput = { AND: andConditions };
+
+	const [logs, total] = await prisma.$transaction([
+		prisma.auditLog.findMany({
+			where,
+			skip,
+			take: limit,
+			orderBy: [{ [sortBy]: sortOrder }, { id: "desc" }],
+			select: {
+				id: true,
+				action: true,
+				entityType: true,
+				entityId: true,
+				before: true,
+				after: true,
+				actorRole: true,
+				ipAddress: true,
+				createdAt: true,
+				// null for system actions such as the bKash callback
+				actor: { select: { id: true, name: true, email: true } },
+			},
+		}),
+		prisma.auditLog.count({ where }),
+	]);
+
+	return {
+		data: logs,
+		meta: buildMeta(page, limit, total),
+	};
+};
+
 export const AdminServices = {
 	getStats,
+	getAuditLogs,
 };

@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import httpStatus from "http-status";
 import { catchAsync } from "../../utils/catchAsync";
 import { sendResponse } from "../../utils/sendResponse";
+import type { IAuditLogListQuery } from "./admin.interface";
 import { AdminServices } from "./admin.service";
 
 const getStats = catchAsync(async (_req: Request, res: Response) => {
@@ -18,6 +19,21 @@ const getStats = catchAsync(async (_req: Request, res: Response) => {
 	});
 });
 
+const getAuditLogs = catchAsync(async (req: Request, res: Response) => {
+	const { data, meta } = await AdminServices.getAuditLogs(
+		req.query as IAuditLogListQuery,
+	);
+
+	sendResponse(res, {
+		statusCode: httpStatus.OK,
+		success: true,
+		message: "Audit logs retrieved successfully",
+		data,
+		meta,
+	});
+});
+
 export const AdminController = {
 	getStats,
+	getAuditLogs,
 };

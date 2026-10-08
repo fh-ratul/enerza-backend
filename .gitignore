@@ -16,3 +16,8 @@ package-lock.json
 pnpm-workspace.yaml
 .vscode
 .vercel
+
+# Working notes kept on this machine only
+CLAUDE.md
+Project Requirements.md
+docs/

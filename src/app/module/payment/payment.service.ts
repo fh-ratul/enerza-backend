@@ -18,6 +18,7 @@ import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
 import { createAuditLog } from "../../utils/auditLog";
 import { CACHE_KEYS, cacheDel } from "../../utils/cache";
+import { paymentReceiptEmail, sendEmail } from "../../utils/email";
 import { takaToPaisa } from "../bill/bill.utils";
 import type {
 	IBkashCallbackQuery,
@@ -429,12 +430,36 @@ const handleBkashCallback = async (query: IBkashCallbackQuery, ip?: string) => {
 		return true;
 	});
 
+	const result = await getCallbackResult(paymentID);
+
+	// Only the callback that actually settled the payment sends the receipt,
+	// so a replay never emails the customer twice.
 	if (settled) {
 		// Revenue and the unpaid total on the dashboard have changed.
 		await cacheDel(CACHE_KEYS.adminStats);
+
+		const payer = await prisma.user.findFirst({
+			where: { customer: { payments: { some: { id: payment.id } } } },
+			select: { name: true, email: true },
+		});
+
+		if (payer) {
+			await sendEmail(
+				paymentReceiptEmail({
+					customerName: payer.name,
+					email: payer.email,
+					billNumber: result.payment.bill.billNumber,
+					billingMonth: result.payment.bill.billingMonth,
+					amount: result.payment.amount,
+					bkashTrxId: trxId,
+					paidAt: now,
+					requiresRefund: result.payment.requiresRefund,
+				}),
+			);
+		}
 	}
 
-	return getCallbackResult(paymentID);
+	return result;
 };
 
 export const PaymentServices = {

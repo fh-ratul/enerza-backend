@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { Role } from "../../../generated/prisma/enums";
+import { upload } from "../../lib/multer";
 import { auth } from "../../middleware/checkAuth";
+import { parseFormData } from "../../middleware/parseFormData";
 import {
 	validateParams,
 	validateQuery,
@@ -19,9 +21,13 @@ router.get(
 	UserController.getMyProfile,
 );
 
+// JSON, or multipart/form-data with an optional `profilePhoto` image and the
+// fields either as plain form fields or as JSON in a `data` field.
 router.patch(
 	"/me",
 	auth(Role.CUSTOMER, Role.TECHNICIAN, Role.ADMIN),
+	upload.single("profilePhoto"),
+	parseFormData,
 	validateRequest(UserValidation.UpdateMyProfileZodSchema),
 	UserController.updateMyProfile,
 );

@@ -51,6 +51,7 @@ model OutageReport {
   id          String       @id @default(uuid(7))
   status      ReportStatus @default(OPEN)
   description String
+  photoUrl    String? // optional photo of the fault, stored on Cloudinary
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 

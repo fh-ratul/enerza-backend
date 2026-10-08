@@ -33,10 +33,9 @@ const UpdateMyProfileZodSchema = z
 		meterNumber: meterNumberSchema.optional(),
 		isAvailable: z.boolean("isAvailable must be true or false").optional(),
 	})
-	.strict()
-	.refine((body) => Object.keys(body).length > 0, {
-		message: "Provide at least one field to update",
-	});
+	// "Nothing to update" is checked in the service, where it is known
+	// whether a profile photo came with the request.
+	.strict();
 
 const UserListQueryZodSchema = z.object({
 	...paginationQueryShape,

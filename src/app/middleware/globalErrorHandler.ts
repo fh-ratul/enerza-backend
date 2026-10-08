@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import httpStatus from "http-status";
+import { MulterError } from "multer";
 import { ZodError } from "zod";
 import { Prisma } from "../../generated/prisma/client";
 import config from "../config";
@@ -142,6 +143,16 @@ export const globalErrorHandler = (
 			err.name === "TokenExpiredError"
 				? "Token has expired. Please log in again"
 				: "Invalid token. Please log in again";
+	} else if (err instanceof MulterError) {
+		// upload rejected before it reached the route: too large, wrong field, …
+		statusCode = httpStatus.BAD_REQUEST;
+		message =
+			err.code === "LIMIT_FILE_SIZE"
+				? "The image is too large. The limit is 5 MB"
+				: err.code === "LIMIT_UNEXPECTED_FILE"
+					? "Unexpected file field"
+					: "The file could not be uploaded";
+		errors = [{ path: err.field ?? "file", message }];
 	} else if (isBodyParserError(err)) {
 		// express.json() failures: malformed JSON, payload too large, …
 		statusCode = err.status;

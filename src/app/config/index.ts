@@ -61,6 +61,15 @@ const envSchema = z.object({
 	BKASH_APP_SECRET: required("BKASH_APP_SECRET"),
 	BKASH_CALLBACK_URL: z.url("BKASH_CALLBACK_URL must be a valid URL"),
 
+	// Gmail SMTP: the account, its app password, and the address mail is sent from.
+	SMTP_USER: z.email("SMTP_USER must be a valid email"),
+	SMTP_PASSWORD: required("SMTP_PASSWORD"),
+	EMAIL_SENDER: z.email("EMAIL_SENDER must be a valid email"),
+
+	CLOUDINARY_CLOUD_NAME: required("CLOUDINARY_CLOUD_NAME"),
+	CLOUDINARY_API_KEY: required("CLOUDINARY_API_KEY"),
+	CLOUDINARY_API_SECRET: required("CLOUDINARY_API_SECRET"),
+
 	// Set by Vercel itself inside its functions.
 	VERCEL: optional,
 });
@@ -106,4 +115,10 @@ export default {
 	bkash_app_key: env.BKASH_APP_KEY,
 	bkash_app_secret: env.BKASH_APP_SECRET,
 	bkash_callback_url: env.BKASH_CALLBACK_URL.replace(/\/+$/, ""),
+	smtp_user: env.SMTP_USER,
+	smtp_password: env.SMTP_PASSWORD,
+	email_sender: env.EMAIL_SENDER,
+	cloudinary_cloud_name: env.CLOUDINARY_CLOUD_NAME,
+	cloudinary_api_key: env.CLOUDINARY_API_KEY,
+	cloudinary_api_secret: env.CLOUDINARY_API_SECRET,
 };

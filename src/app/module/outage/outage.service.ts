@@ -14,11 +14,13 @@ import type {
 	OutageTimelineSelect,
 	OutageWhereInput,
 } from "../../../generated/prisma/models";
+import { deleteImage, uploadImage } from "../../lib/cloudinary";
 import { prisma } from "../../lib/prisma";
 import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
 import { createAuditLog } from "../../utils/auditLog";
 import { CACHE_KEYS, cacheDel } from "../../utils/cache";
+import { outageResolvedEmail, sendEmail } from "../../utils/email";
 import {
 	LOCKING_TRANSACTION_OPTIONS,
 	lockFeeders,
@@ -81,6 +83,7 @@ const reportSelect = {
 	id: true,
 	status: true,
 	description: true,
+	photoUrl: true,
 	createdAt: true,
 } satisfies OutageReportSelect;
 
@@ -109,6 +112,7 @@ const reportOutage = async (
 	payload: ICreateOutagePayload,
 	user: RequestUser,
 	ip?: string,
+	photo?: Express.Multer.File,
 ) => {
 	const { description } = payload;
 
@@ -153,187 +157,215 @@ const reportOutage = async (
 	const { feeder } = area;
 	const actor = { userId: user.userId, role: user.role };
 
-	const result = await prisma.$transaction(async (tx) => {
-		// Every report for this feeder queues up behind this lock. That is what
-		// guarantees "one open outage per feeder": two neighbours reporting at
-		// the same moment cannot both find "no open outage" and both create one.
-		await lockFeeders(tx, [feeder.id]);
+	// The photo goes to Cloudinary before the transaction opens: a network
+	// call must never run while the feeder row is locked.
+	const uploaded = photo && (await uploadImage(photo.buffer, "outage-reports"));
+	const photoUrl = uploaded?.url;
 
-		const openReport = await tx.outageReport.findFirst({
-			where: { customerId: customer.id, status: ReportStatus.OPEN },
-			select: { id: true },
-		});
+	const runIntake = () =>
+		prisma.$transaction(async (tx) => {
+			// Every report for this feeder queues up behind this lock. That is what
+			// guarantees "one open outage per feeder": two neighbours reporting at
+			// the same moment cannot both find "no open outage" and both create one.
+			await lockFeeders(tx, [feeder.id]);
 
-		if (openReport) {
-			throw new AppError(
-				httpStatus.CONFLICT,
-				"You already have an open outage report. It will be closed when the outage is resolved",
-			);
-		}
-
-		// 1. A published schedule is running right now: the cut is expected.
-		const ongoingSchedule = await tx.schedule.findFirst({
-			where: { feederId: feeder.id, ...phaseWhere("ONGOING") },
-			orderBy: { endTime: "desc" },
-			select: {
-				id: true,
-				type: true,
-				startTime: true,
-				endTime: true,
-				reason: true,
-			},
-		});
-
-		if (ongoingSchedule) {
-			// Asking again during the same schedule gets the same answer
-			// without piling up identical rows.
-			const earlierReport = await tx.outageReport.findFirst({
-				where: {
-					customerId: customer.id,
-					scheduleId: ongoingSchedule.id,
-					status: ReportStatus.EXPLAINED,
-				},
-				select: reportSelect,
+			const openReport = await tx.outageReport.findFirst({
+				where: { customerId: customer.id, status: ReportStatus.OPEN },
+				select: { id: true },
 			});
 
-			const report =
-				earlierReport ??
-				(await tx.outageReport.create({
-					data: {
-						status: ReportStatus.EXPLAINED,
-						description,
-						customerId: customer.id,
-						areaId: area.id,
-						scheduleId: ongoingSchedule.id,
-					},
-					select: reportSelect,
-				}));
-
-			return {
-				outcome: OUTAGE_OUTCOME.EXPLAINED_BY_SCHEDULE,
-				isNew: !earlierReport,
-				explanation: `${SCHEDULE_LABEL[ongoingSchedule.type]} until ${toDhakaTimeString(ongoingSchedule.endTime)}. No outage was opened`,
-				report,
-				schedule: ongoingSchedule,
-			};
-		}
-
-		const openOutage = await tx.outage.findFirst({
-			where: {
-				feederId: feeder.id,
-				status: { in: [...OPEN_OUTAGE_STATUSES] },
-			},
-			select: { id: true, priority: true },
-		});
-
-		// 2. The feeder already has an open outage: attach this report to it.
-		if (openOutage) {
-			// Atomic increment, then the priority is recomputed from the new count.
-			const counted = await tx.outage.update({
-				where: { id: openOutage.id },
-				data: { reportCount: { increment: 1 } },
-				select: { reportCount: true },
-			});
-			const priority = computeOutagePriority(
-				feeder.priority,
-				counted.reportCount,
-			);
-
-			if (priority !== openOutage.priority) {
-				await tx.outage.update({
-					where: { id: openOutage.id },
-					data: { priority },
-				});
-
-				await createAuditLog(tx, {
-					actor,
-					action: AuditAction.UPDATE,
-					entityType: "Outage",
-					entityId: openOutage.id,
-					before: { priority: openOutage.priority },
-					after: {
-						priority,
-						reportCount: counted.reportCount,
-						reason: "Escalated by the number of customer reports",
-					},
-					ip,
-				});
+			if (openReport) {
+				throw new AppError(
+					httpStatus.CONFLICT,
+					"You already have an open outage report. It will be closed when the outage is resolved",
+				);
 			}
 
-			const report = await tx.outageReport.create({
-				data: {
-					description,
-					customerId: customer.id,
-					areaId: area.id,
-					outageId: openOutage.id,
+			// 1. A published schedule is running right now: the cut is expected.
+			const ongoingSchedule = await tx.schedule.findFirst({
+				where: { feederId: feeder.id, ...phaseWhere("ONGOING") },
+				orderBy: { endTime: "desc" },
+				select: {
+					id: true,
+					type: true,
+					startTime: true,
+					endTime: true,
+					reason: true,
 				},
-				select: reportSelect,
 			});
 
-			const outage = await tx.outage.findUniqueOrThrow({
-				where: { id: openOutage.id },
-				select: outageSelect,
+			if (ongoingSchedule) {
+				// Asking again during the same schedule gets the same answer
+				// without piling up identical rows.
+				const earlierReport = await tx.outageReport.findFirst({
+					where: {
+						customerId: customer.id,
+						scheduleId: ongoingSchedule.id,
+						status: ReportStatus.EXPLAINED,
+					},
+					select: reportSelect,
+				});
+
+				const report =
+					earlierReport ??
+					(await tx.outageReport.create({
+						data: {
+							status: ReportStatus.EXPLAINED,
+							description,
+							photoUrl,
+							customerId: customer.id,
+							areaId: area.id,
+							scheduleId: ongoingSchedule.id,
+						},
+						select: reportSelect,
+					}));
+
+				return {
+					outcome: OUTAGE_OUTCOME.EXPLAINED_BY_SCHEDULE,
+					isNew: !earlierReport,
+					explanation: `${SCHEDULE_LABEL[ongoingSchedule.type]} until ${toDhakaTimeString(ongoingSchedule.endTime)}. No outage was opened`,
+					report,
+					schedule: ongoingSchedule,
+				};
+			}
+
+			const openOutage = await tx.outage.findFirst({
+				where: {
+					feederId: feeder.id,
+					status: { in: [...OPEN_OUTAGE_STATUSES] },
+				},
+				select: { id: true, priority: true },
+			});
+
+			// 2. The feeder already has an open outage: attach this report to it.
+			if (openOutage) {
+				// Atomic increment, then the priority is recomputed from the new count.
+				const counted = await tx.outage.update({
+					where: { id: openOutage.id },
+					data: { reportCount: { increment: 1 } },
+					select: { reportCount: true },
+				});
+				const priority = computeOutagePriority(
+					feeder.priority,
+					counted.reportCount,
+				);
+
+				if (priority !== openOutage.priority) {
+					await tx.outage.update({
+						where: { id: openOutage.id },
+						data: { priority },
+					});
+
+					await createAuditLog(tx, {
+						actor,
+						action: AuditAction.UPDATE,
+						entityType: "Outage",
+						entityId: openOutage.id,
+						before: { priority: openOutage.priority },
+						after: {
+							priority,
+							reportCount: counted.reportCount,
+							reason: "Escalated by the number of customer reports",
+						},
+						ip,
+					});
+				}
+
+				const report = await tx.outageReport.create({
+					data: {
+						description,
+						photoUrl,
+						customerId: customer.id,
+						areaId: area.id,
+						outageId: openOutage.id,
+					},
+					select: reportSelect,
+				});
+
+				const outage = await tx.outage.findUniqueOrThrow({
+					where: { id: openOutage.id },
+					select: outageSelect,
+				});
+
+				return {
+					outcome: OUTAGE_OUTCOME.LINKED_TO_EXISTING_OUTAGE,
+					isNew: true,
+					explanation:
+						"This outage has already been reported. Your report was added to it",
+					report,
+					outage,
+				};
+			}
+
+			// 3. Nothing explains the cut yet: open a new outage with this report.
+			const created = await tx.outage.create({
+				data: {
+					priority: computeOutagePriority(feeder.priority, 1),
+					description,
+					reportCount: 1,
+					feederId: feeder.id,
+					timeline: {
+						create: {
+							toStatus: OutageStatus.REPORTED,
+							note: description,
+							changedById: user.userId,
+						},
+					},
+					reports: {
+						create: {
+							description,
+							photoUrl,
+							customerId: customer.id,
+							areaId: area.id,
+						},
+					},
+				},
+				select: { ...outageSelect, reports: { select: reportSelect } },
+			});
+			const { reports, ...outage } = created;
+
+			await createAuditLog(tx, {
+				actor,
+				action: AuditAction.CREATE,
+				entityType: "Outage",
+				entityId: outage.id,
+				after: {
+					status: outage.status,
+					priority: outage.priority,
+					feederId: feeder.id,
+					feederCode: outage.feeder.code,
+					source: "CUSTOMER_REPORT",
+				},
+				ip,
 			});
 
 			return {
-				outcome: OUTAGE_OUTCOME.LINKED_TO_EXISTING_OUTAGE,
+				outcome: OUTAGE_OUTCOME.NEW_OUTAGE_CREATED,
 				isNew: true,
-				explanation:
-					"This outage has already been reported. Your report was added to it",
-				report,
+				explanation: "Outage reported. A technician will be assigned shortly",
+				report: reports[0],
 				outage,
 			};
+		}, LOCKING_TRANSACTION_OPTIONS);
+
+	let result: Awaited<ReturnType<typeof runIntake>>;
+
+	try {
+		result = await runIntake();
+	} catch (error) {
+		// Nothing was saved, so the uploaded photo would be an orphan.
+		if (uploaded) {
+			await deleteImage(uploaded.publicId);
 		}
 
-		// 3. Nothing explains the cut yet: open a new outage with this report.
-		const created = await tx.outage.create({
-			data: {
-				priority: computeOutagePriority(feeder.priority, 1),
-				description,
-				reportCount: 1,
-				feederId: feeder.id,
-				timeline: {
-					create: {
-						toStatus: OutageStatus.REPORTED,
-						note: description,
-						changedById: user.userId,
-					},
-				},
-				reports: {
-					create: {
-						description,
-						customerId: customer.id,
-						areaId: area.id,
-					},
-				},
-			},
-			select: { ...outageSelect, reports: { select: reportSelect } },
-		});
-		const { reports, ...outage } = created;
+		throw error;
+	}
 
-		await createAuditLog(tx, {
-			actor,
-			action: AuditAction.CREATE,
-			entityType: "Outage",
-			entityId: outage.id,
-			after: {
-				status: outage.status,
-				priority: outage.priority,
-				feederId: feeder.id,
-				feederCode: outage.feeder.code,
-				source: "CUSTOMER_REPORT",
-			},
-			ip,
-		});
-
-		return {
-			outcome: OUTAGE_OUTCOME.NEW_OUTAGE_CREATED,
-			isNew: true,
-			explanation: "Outage reported. A technician will be assigned shortly",
-			report: reports[0],
-			outage,
-		};
-	}, LOCKING_TRANSACTION_OPTIONS);
+	// A repeat report during the same schedule reuses the earlier report,
+	// which leaves the new photo unused.
+	if (uploaded && result.report.photoUrl !== uploaded.url) {
+		await deleteImage(uploaded.publicId);
+	}
 
 	// Open-outage counts on the dashboard have changed.
 	await cacheDel(CACHE_KEYS.adminStats);
@@ -428,13 +460,16 @@ const createIncident = async (
 	};
 };
 
+// A photo belongs to a customer's report. An admin incident has none, so a
+// file sent by an admin is not uploaded.
 const createOutage = async (
 	payload: ICreateOutagePayload,
 	user: RequestUser,
 	ip?: string,
+	photo?: Express.Multer.File,
 ) => {
 	if (user.role === Role.CUSTOMER) {
-		return reportOutage(payload, user, ip);
+		return reportOutage(payload, user, ip, photo);
 	}
 
 	return createIncident(payload, user, ip);
@@ -874,6 +909,26 @@ const updateOutageStatus = async (
 
 	// Open counts, MTTR and technician workload on the dashboard have changed.
 	await cacheDel(CACHE_KEYS.adminStats);
+
+	// Tell everyone who reported this outage that their power is back.
+	if (toStatus === OutageStatus.RESOLVED) {
+		const reporters = await prisma.user.findMany({
+			where: {
+				isDeleted: false,
+				customer: { reports: { some: { outageId: id } } },
+			},
+			select: { email: true },
+		});
+
+		await sendEmail(
+			outageResolvedEmail({
+				emails: reporters.map((reporter) => reporter.email),
+				feederName: result.outage.feeder.name,
+				resolutionNote: result.outage.resolutionNote,
+				durationMinutes: result.outage.durationMinutes,
+			}),
+		);
+	}
 
 	return result;
 };

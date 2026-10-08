@@ -18,10 +18,12 @@ It is a REST API only (no frontend), built for Programming Hero B7A6, assignment
 - **Outages** — customer reports are deduplicated into one outage per feeder, explained away when a published schedule is the cause, prioritised, and moved through a state machine with manual or automatic technician assignment.
 - **Billing and payment** — slab-tariff bills, bKash tokenized checkout, and a verified, idempotent payment callback.
 - **Admin** — dashboard (MTTR, SAIFI, SAIDI, revenue), user management, and an audit log of every critical action.
+- **Email notifications** — welcome, bill issued, payment receipt, outage resolved and schedule published, sent over SMTP.
+- **Photo uploads** — profile photos and photos attached to outage reports, stored on Cloudinary.
 
 ## Tech stack
 
-Express 5 · TypeScript (ESM) · Prisma 7 with the `pg` driver adapter · PostgreSQL · Redis · Zod 4 · JWT + bcryptjs · google-auth-library · bKash tokenized checkout · helmet · express-rate-limit with a Redis store · Biome · tsup · Vercel.
+Express 5 · TypeScript (ESM) · Prisma 7 with the `pg` driver adapter · PostgreSQL · Redis · Zod 4 · JWT + bcryptjs · google-auth-library · bKash tokenized checkout · Nodemailer (Gmail SMTP) · Cloudinary + Multer · helmet · express-rate-limit with a Redis store · Biome · tsup · Vercel.
 
 ## Getting started
 
@@ -63,6 +65,8 @@ The server validates these at startup and refuses to boot if one is missing or m
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USER`, `REDIS_PASSWORD` | Caching and rate limiting. If Redis is unreachable the API keeps working: reads go to the database and rate limits fall back to memory |
 | `BKASH_BASE_URL`, `BKASH_USERNAME`, `BKASH_PASSWORD`, `BKASH_APP_KEY`, `BKASH_APP_SECRET` | bKash tokenized checkout (sandbox) credentials |
 | `BKASH_CALLBACK_URL` | This API's public base URL including `/api/v1`, e.g. `http://localhost:5000/api/v1` |
+| `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_SENDER` | Gmail account, its app password, and the "from" address for notification emails |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | Cloudinary account for photo uploads |
 
 ### Demo accounts (created by the seed)
 
@@ -87,7 +91,7 @@ Base path: `/api/v1`. **C** = customer, **T** = technician, **A** = admin.
 | 3 | POST | `/auth/google` | Public | Login with a Google ID token |
 | 4 | POST | `/auth/refresh-token` | Public | New access and refresh tokens |
 | 5 | GET | `/users/me` | C/T/A | Own profile |
-| 6 | PATCH | `/users/me` | C/T/A | Update profile; technicians go on or off duty |
+| 6 | PATCH | `/users/me` | C/T/A | Update profile and profile photo; technicians go on or off duty |
 | 7 | GET | `/users` | A | List users with search, filters, pagination |
 | 8 | PATCH | `/users/:id` | A | Block, unblock, or promote to technician |
 | 9 | POST | `/feeders` | A | Create a feeder with nested areas |
@@ -98,7 +102,7 @@ Base path: `/api/v1`. **C** = customer, **T** = technician, **A** = admin.
 | 14 | POST | `/schedules/generate` | A | Fair load-shedding plan, dry run or saved |
 | 15 | GET | `/schedules` | C/A | Admin: all. Customer: their feeder |
 | 16 | PATCH | `/schedules/:id/status` | A | Publish or cancel |
-| 17 | POST | `/outages` | C/A | Report an outage, or log an incident |
+| 17 | POST | `/outages` | C/A | Report an outage (optionally with a photo), or log an incident |
 | 18 | GET | `/outages` | C/T/A | Role-aware list with timeline |
 | 19 | PATCH | `/outages/:id/status` | T/A | Assign, start, resolve, cancel |
 | 20 | POST | `/bills` | A | Issue a monthly bill |
@@ -124,9 +128,9 @@ List endpoints take `page`, `limit` (max 100), `sortBy` (whitelisted per endpoin
 
 ### Postman
 
-Import [`Enerza.postman_collection.json`](Enerza.postman_collection.json), run the three **Login as …** requests, then run the folders top to bottom. Requests save the tokens and ids that later requests need, and a pre-request script looks up the seeded grid ids. Every request has saved example responses (89 in total), including 400, 401, 403, 404 and 409 cases.
+Import [`Enerza.postman_collection.json`](Enerza.postman_collection.json), run the three **Login as …** requests, then run the folders top to bottom. Requests save the tokens and ids that later requests need, and a pre-request script looks up the seeded grid ids. Every request has saved example responses (91 in total), including 400, 401, 403, 404 and 409 cases.
 
-The examples were recorded from a freshly seeded local database. Tokens are redacted, and the bKash gateway was simulated for the payment examples.
+The examples were recorded from a freshly seeded local database. Tokens are redacted, the bKash gateway was simulated for the payment examples, and no email was sent. For the two multipart requests, pick your own image file in Postman.
 
 ## How the main rules work
 
@@ -146,6 +150,10 @@ The examples were recorded from a freshly seeded local database. Tokens are reda
 
 **Audit.** Feeder changes, user status and role changes, schedule actions, every outage transition, bill issuing and payment results are written to the audit log in the same transaction as the change.
 
+**Emails.** Five events send an email: registration (welcome), a bill being issued, a payment being settled (receipt), an outage being resolved (to everyone who reported it) and a schedule being published (to the customers on that feeder). Emails go out after the database transaction has committed and are best-effort: if SMTP fails, the action still succeeds and the failure is logged. Each one adds a second or two to its request, because a serverless function cannot keep working after it has responded. The seeded demo accounts (`@enerza.com`) have no mailbox, so nothing is sent to them; register with a real address to receive mail.
+
+**Photo uploads.** `PATCH /users/me` and `POST /outages` accept `multipart/form-data` as well as JSON. The image goes in `profilePhoto` or `photo` (JPEG, PNG or WebP, up to 5 MB); other fields are sent as form fields, or as JSON in a field named `data`. The file is held in memory, validated with the rest of the request, uploaded to Cloudinary before the database transaction, and removed again if the request then fails. Replacing a profile photo deletes the old image.
+
 **Deleting.** Users, feeders and areas are soft-deleted. Schedules and outages are cancelled. Bills, payments, reports, timelines and audit logs are never deleted.
 
 **Security.** helmet, CORS limited to `FRONTEND_URL`, bcrypt-hashed passwords that are never returned, Zod validation on every input with unknown body fields rejected, and Redis-backed rate limits: 100 requests a minute overall, 10 per 15 minutes on register and login, 5 a minute per customer on payment initiation.
@@ -162,9 +170,9 @@ src/
   app.ts             middleware and route mounting
   app/
     config/          zod-validated environment
-    lib/             prisma, redis, googleAuth, bkash
+    lib/             prisma, redis, googleAuth, bkash, cloudinary, multer, nodemailer
     middleware/      auth, validation, rate limiting, error handling
-    utils/           AppError, pagination, time, cache, audit log, feeder lock …
+    utils/           AppError, pagination, time, cache, audit log, feeder lock, email …
     module/
       auth/  user/  feeder/  schedule/  outage/  bill/  payment/  admin/
 ```
@@ -192,8 +200,8 @@ On Vercel, rate limits and caches live in Redis because serverless instances do 
 
 ## Future work
 
-- Email or SMS notifications for published schedules and outage updates.
+- SMS notifications, and a queue so emails do not add to request time.
 - A refund flow for payments flagged `requiresRefund`.
-- Outage photos and meter-reading uploads.
+- Meter-reading photo uploads.
 - Integration tests that run against a disposable database.
 - Password reset and email verification.

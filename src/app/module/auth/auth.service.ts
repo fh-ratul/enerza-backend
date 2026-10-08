@@ -10,6 +10,7 @@ import config from "../../config";
 import { googleClient } from "../../lib/googleAuth";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../utils/AppError";
+import { sendEmail, welcomeEmail } from "../../utils/email";
 import { jwtUtils, type TTokenPayload } from "../../utils/jwt";
 import type {
 	IGoogleLoginPayload,
@@ -122,6 +123,15 @@ const register = async (payload: IRegisterPayload) => {
 
 		return { user, customer };
 	});
+
+	await sendEmail(
+		welcomeEmail({
+			name: result.user.name,
+			email: result.user.email,
+			meterNumber: result.customer.meterNumber,
+			areaName: result.customer.area?.name,
+		}),
+	);
 
 	return {
 		...createTokens(result.user),

@@ -7,6 +7,7 @@ import {
 	Role,
 	ScheduleStatus,
 	ScheduleType,
+	UserStatus,
 } from "../../../generated/prisma/enums";
 import type {
 	FeederWhereInput,
@@ -25,6 +26,7 @@ import {
 	cacheGet,
 	cacheSet,
 } from "../../utils/cache";
+import { schedulePublishedEmail, sendEmail } from "../../utils/email";
 import {
 	LOCKING_TRANSACTION_OPTIONS,
 	lockFeeders,
@@ -691,6 +693,29 @@ const updateScheduleStatus = async (
 
 	// Publishing or cancelling changes what customers on this feeder see.
 	await invalidateCustomerSchedules([existing.feederId]);
+
+	// Customers on the feeder are told about the cut as soon as it is official.
+	if (status === ScheduleStatus.PUBLISHED) {
+		const customers = await prisma.user.findMany({
+			where: {
+				isDeleted: false,
+				status: UserStatus.ACTIVE,
+				customer: { area: { feederId: existing.feederId, isDeleted: false } },
+			},
+			select: { email: true },
+		});
+
+		await sendEmail(
+			schedulePublishedEmail({
+				emails: customers.map((customer) => customer.email),
+				type: updated.type,
+				feederName: updated.feeder.name,
+				startTime: updated.startTime,
+				endTime: updated.endTime,
+				reason: updated.reason,
+			}),
+		);
+	}
 
 	return withPhase(updated);
 };

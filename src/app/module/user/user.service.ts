@@ -7,6 +7,7 @@ import {
 } from "../../../generated/prisma/enums";
 import type { UserWhereInput } from "../../../generated/prisma/models";
 import type { TErrorSource } from "../../interfaces";
+import { deleteImage, uploadImage } from "../../lib/cloudinary";
 import { prisma } from "../../lib/prisma";
 import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
@@ -26,6 +27,7 @@ const adminUserSelect = {
 	id: true,
 	name: true,
 	email: true,
+	profilePhoto: true,
 	role: true,
 	status: true,
 	authProvider: true,
@@ -59,6 +61,7 @@ const getMyProfile = async (user: RequestUser) => {
 			id: true,
 			name: true,
 			email: true,
+			profilePhoto: true,
 			role: true,
 			status: true,
 			authProvider: true,
@@ -141,9 +144,17 @@ const getMyProfile = async (user: RequestUser) => {
 const updateMyProfile = async (
 	user: RequestUser,
 	payload: IUpdateMyProfilePayload,
+	photo?: Express.Multer.File,
 ) => {
 	const { name, contactNumber, address, areaId, meterNumber, isAvailable } =
 		payload;
+
+	if (Object.keys(payload).length === 0 && !photo) {
+		throw new AppError(
+			httpStatus.BAD_REQUEST,
+			"Provide at least one field to update",
+		);
+	}
 
 	// Reject fields that do not belong to the caller's role, naming each one.
 	const errors: TErrorSource[] = [];
@@ -253,29 +264,59 @@ const updateMyProfile = async (
 		}
 	}
 
-	// Prisma skips `undefined` values, so only the fields that were sent change.
-	await prisma.$transaction(async (tx) => {
-		if (name !== undefined) {
-			await tx.user.update({
+	// The upload is a network call, so it happens before the transaction and
+	// only once everything else about the request has been accepted.
+	const uploaded = photo && (await uploadImage(photo.buffer, "profiles"));
+	let previousPhotoPublicId: string | null;
+
+	try {
+		// Prisma skips `undefined` values, so only the fields that were sent change.
+		previousPhotoPublicId = await prisma.$transaction(async (tx) => {
+			const previous = await tx.user.findUniqueOrThrow({
 				where: { id: user.userId },
-				data: { name },
+				select: { profilePhotoPublicId: true },
 			});
+
+			if (name !== undefined || uploaded) {
+				await tx.user.update({
+					where: { id: user.userId },
+					data: {
+						name,
+						profilePhoto: uploaded?.url,
+						profilePhotoPublicId: uploaded?.publicId,
+					},
+				});
+			}
+
+			if (user.role === Role.CUSTOMER) {
+				await tx.customer.update({
+					where: { userId: user.userId },
+					data: { contactNumber, address, areaId, meterNumber },
+				});
+			}
+
+			if (user.role === Role.TECHNICIAN) {
+				await tx.technician.update({
+					where: { userId: user.userId },
+					data: { contactNumber, isAvailable },
+				});
+			}
+
+			return previous.profilePhotoPublicId;
+		});
+	} catch (error) {
+		// The profile was not saved, so the new image would be an orphan.
+		if (uploaded) {
+			await deleteImage(uploaded.publicId);
 		}
 
-		if (user.role === Role.CUSTOMER) {
-			await tx.customer.update({
-				where: { userId: user.userId },
-				data: { contactNumber, address, areaId, meterNumber },
-			});
-		}
+		throw error;
+	}
 
-		if (user.role === Role.TECHNICIAN) {
-			await tx.technician.update({
-				where: { userId: user.userId },
-				data: { contactNumber, isAvailable },
-			});
-		}
-	});
+	// The replaced image is of no use any more.
+	if (uploaded && previousPhotoPublicId) {
+		await deleteImage(previousPhotoPublicId);
+	}
 
 	return getMyProfile(user);
 };

@@ -9,6 +9,7 @@ import type { RequestUser } from "../../middleware/checkAuth";
 import { AppError } from "../../utils/AppError";
 import { createAuditLog } from "../../utils/auditLog";
 import { CACHE_KEYS, cacheDel } from "../../utils/cache";
+import { billIssuedEmail, sendEmail } from "../../utils/email";
 import { buildMeta, paginationHelper } from "../../utils/paginationHelper";
 import { addDays, toDhakaMonthString } from "../../utils/time";
 import { BILL_DUE_DAYS, BILL_SORTABLE_FIELDS } from "./bill.constant";
@@ -200,7 +201,21 @@ const createBill = async (
 	// Billed and outstanding totals on the dashboard have changed.
 	await cacheDel(CACHE_KEYS.adminStats);
 
-	return presentBill(bill, now);
+	const presented = presentBill(bill, now);
+
+	await sendEmail(
+		billIssuedEmail({
+			customerName: bill.customer.user.name,
+			email: bill.customer.user.email,
+			billNumber: bill.billNumber,
+			billingMonth: bill.billingMonth,
+			unitsConsumed: bill.unitsConsumed,
+			totalAmount: presented.totalAmount,
+			dueDate: bill.dueDate,
+		}),
+	);
+
+	return presented;
 };
 
 // Admin: every bill. Customer: their own. Each bill carries its payment

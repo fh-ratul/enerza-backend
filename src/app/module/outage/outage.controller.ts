@@ -11,6 +11,7 @@ const createOutage = catchAsync(async (req: Request, res: Response) => {
 		req.body,
 		req.user as RequestUser,
 		req.ip,
+		req.file,
 	);
 
 	sendResponse(res, {

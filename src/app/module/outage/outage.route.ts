@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { Role } from "../../../generated/prisma/enums";
+import { upload } from "../../lib/multer";
 import { auth } from "../../middleware/checkAuth";
+import { parseFormData } from "../../middleware/parseFormData";
 import {
 	validateParams,
 	validateQuery,
@@ -13,9 +15,12 @@ import { OutageValidation } from "./outage.validation";
 const router = Router();
 
 // Customer: report a power cut. Admin: log an incident on a feeder.
+// JSON, or multipart/form-data when a customer attaches a `photo` of the fault.
 router.post(
 	"/",
 	auth(Role.CUSTOMER, Role.ADMIN),
+	upload.single("photo"),
+	parseFormData,
 	validateRequest(OutageValidation.CreateOutageZodSchema),
 	OutageController.createOutage,
 );

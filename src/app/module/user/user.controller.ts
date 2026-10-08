@@ -21,6 +21,7 @@ const updateMyProfile = catchAsync(async (req: Request, res: Response) => {
 	const result = await UserServices.updateMyProfile(
 		req.user as RequestUser,
 		req.body,
+		req.file,
 	);
 
 	sendResponse(res, {

@@ -7,7 +7,13 @@
 	},
 	"files": {
 		"ignoreUnknown": true,
-		"includes": ["**", "!src/generated", "!_reference", "!dist"]
+		"includes": [
+			"**",
+			"!src/generated",
+			"!_reference",
+			"!dist",
+			"!Enerza.postman_collection.json"
+		]
 	},
 	"formatter": {
 		"enabled": true,

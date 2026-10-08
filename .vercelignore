@@ -1,0 +1,9 @@
+# Deployed with the Vercel CLI after `npm run build`: the bundle in dist/ is what runs.
+node_modules
+.env
+.env.*
+_reference
+docs
+src
+prisma
+*.postman_collection.json

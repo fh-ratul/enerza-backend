@@ -30,4 +30,11 @@ const main = async () => {
 	}
 };
 
-main();
+// Locally (and on any long-running host) the server connects and listens.
+// On Vercel the default export below is the request handler: connections
+// are opened lazily by the first query.
+if (!config.is_serverless) {
+	main();
+}
+
+export default app;

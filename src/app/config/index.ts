@@ -60,6 +60,9 @@ const envSchema = z.object({
 	BKASH_APP_KEY: required("BKASH_APP_KEY"),
 	BKASH_APP_SECRET: required("BKASH_APP_SECRET"),
 	BKASH_CALLBACK_URL: z.url("BKASH_CALLBACK_URL must be a valid URL"),
+
+	// Set by Vercel itself inside its functions.
+	VERCEL: optional,
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -79,6 +82,8 @@ export default {
 	node_env: env.NODE_ENV,
 	is_production: env.NODE_ENV === "production",
 	is_development: env.NODE_ENV === "development",
+	// On Vercel the platform calls the exported app; nothing listens on a port.
+	is_serverless: Boolean(env.VERCEL),
 	port: env.PORT,
 	database_url: env.DATABASE_URL,
 	frontend_url: env.FRONTEND_URL,

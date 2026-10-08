@@ -12,6 +12,16 @@ const JWT_ERROR_NAMES = [
 	"NotBeforeError",
 ];
 
+// Prisma's own codes plus the socket errors the pg driver passes through.
+const DB_UNREACHABLE_CODES = [
+	"P1001",
+	"P1002",
+	"ECONNREFUSED",
+	"ECONNRESET",
+	"ENOTFOUND",
+	"ETIMEDOUT",
+];
+
 const zodIssuesToErrors = (error: ZodError): TErrorSource[] =>
 	error.issues.flatMap((issue) => {
 		// A strict object reports all unknown keys in one issue: split them up
@@ -112,6 +122,11 @@ export const globalErrorHandler = (
 		} else if (err.code === "P2034") {
 			statusCode = httpStatus.CONFLICT;
 			message = "The request conflicted with another one. Please try again";
+		} else if (DB_UNREACHABLE_CODES.includes(err.code)) {
+			// the database could not be reached: a retry may well succeed
+			statusCode = httpStatus.SERVICE_UNAVAILABLE;
+			message = "The database is currently unavailable";
+			console.error(`Database unreachable (${err.code})`);
 		} else {
 			isUnexpected = true;
 		}

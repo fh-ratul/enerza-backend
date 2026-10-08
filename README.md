@@ -128,9 +128,9 @@ List endpoints take `page`, `limit` (max 100), `sortBy` (whitelisted per endpoin
 
 ### Postman
 
-Import [`Enerza.postman_collection.json`](Enerza.postman_collection.json), run the three **Login as …** requests, then run the folders top to bottom. Requests save the tokens and ids that later requests need, and a pre-request script looks up the seeded grid ids. Every request has one saved example response, and each folder also has error examples (43 in total, covering 400, 401, 403, 404 and 409). Lists inside the examples are shortened to their first entry to keep the file small.
+Import [`Enerza.postman_collection.json`](Enerza.postman_collection.json), run the three **Login as …** requests, then run the folders top to bottom. Requests save the tokens and ids that later requests need, and a pre-request script looks up the seeded grid ids.
 
-The examples were recorded from a freshly seeded local database. Tokens are redacted, the bKash gateway was simulated for the payment examples, and no email was sent. For the two multipart requests, pick your own image file in Postman.
+Each request's description states the expected status code and the other outcomes it can return (400, 401, 403, 404, 409). For the two upload requests, switch the body to form-data and pick your own image file.
 
 ## How the main rules work
 
